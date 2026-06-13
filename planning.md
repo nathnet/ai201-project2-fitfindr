@@ -138,12 +138,36 @@ Write out what a full user interaction looks like from start to finish — tool 
 
 **Step 1:**
 <!-- What does the agent do first? Which tool is called? With what input? -->
+After reading user query, the agent capture the requirements of the item the user is looking for.
+The captured requirements are "vintage graphic tee", "<=$30", missing size.  
+
+The LLM then looks at the information it needs and calls tool to search for listings user can buy.
+Agent calls search_listings(description="vintage graphic tee", max_price=30.0).
+The tool returns listings matching the description and price range, 
+sorted by relevance from keyword overlap.
 
 **Step 2:**
 <!-- What happens next? What was returned from step 1? What tool is called now? -->
+The LLM receives a new list of listings matching description and max_price it searched.  
+a.) If the returned result contains one or more listings, the LLM selects the most relevant and 
+queues up one tool call for suggest_outfit(selected_item, wardrobe).  
+b.) If an empty result is returned, the LLM stops calling tools, informs the user of unavailability 
+of the clothes the user is looking for, suggesting the user change their requirements. 
 
 **Step 3:**
 <!-- Continue until the full interaction is complete -->
+If the suggest_outfit() is made, the LLM receives back a string for the outfit suggestion.
+a.) In the case where there is enough clothes in the wardrobe, the suggestion is based on
+the existing wardrobe.
+b.) If the wardrobe is minimal/does not have enough clothes for a full outfit (tops, bottoms, shoes), 
+LLM suggests based on the wardrobe and offers a general styling for the missing item. 
+This case is part of the non-empty wardrobe prompt.
+c.) If the wardrobe is empty, LLM offers a general styling advice for the new item.
+
+Afterwards, LLM calls tool create_fit_card(suggestion, selected_item). The tool returns a short, 
+shareable description, similar to an instagram post caption.
 
 **Final output to user:**
 <!-- What does the user actually see at the end? -->
+3 things: 1. top listing match, 2. outfit idea, and 3. a nice caption 
+for their instagram post (fit card)
