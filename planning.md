@@ -7,6 +7,37 @@
 
 ---
 
+## Initial LLM Call
+
+The planning loop is driven by the LLM. On each iteration, the agent calls Groq with the current message history, all tool definitions, and `tool_choice="auto"` so the LLM decides whether to call a tool or return a final response.
+
+**System prompt:**
+```
+You are FitFindr, a thrift shopping assistant. Given a user's query, use the available tools to:
+1. Search for matching thrift listings
+2. Suggest an outfit using the found item and the user's wardrobe
+3. Generate a shareable fit card caption
+
+Call tools in order. If search returns no results, stop and inform the user.
+Only call suggest_outfit and create_fit_card if a listing was found.
+```
+
+**Groq call structure:**
+```python
+response = client.chat.completions.create(
+    model=LLM_MODEL,
+    messages=messages,
+    tools=TOOL_DEFINITIONS,
+    tool_choice="auto",
+)
+```
+
+- `messages` — starts with the system prompt and user query; assistant tool call responses and tool results are appended each iteration
+- `TOOL_DEFINITIONS` — JSON schemas for all available tools (search_listings, suggest_outfit, create_fit_card)
+- `tool_choice="auto"` — LLM decides whether to call a tool or respond directly
+
+---
+
 ## Tools
 
 List every tool your agent will use. For each tool, fill in all four fields.
@@ -16,18 +47,24 @@ You must have at least 3 tools. The three required tools are listed — add any 
 
 **What it does:**
 <!-- Describe what this tool does in 1–2 sentences -->
+Searches the listings for thrift items matching the user's description, with optional size and price filters. Scores each listing by keyword overlap against its description and style_tags (style_tags weighted higher), drops zero-score listings, and returns results sorted by score descending.
 
 **Input parameters:**
 <!-- List each parameter, its type, and what it represents -->
-- `description` (str): ...
-- `size` (str): ...
-- `max_price` (float): ...
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `description` | str | Yes | Keywords describing the item the user is looking for (e.g. "vintage graphic tee") |
+| `size` | str or None | No | Size string to filter by; case-insensitive substring match against the listing's size field. Size formats vary by category (e.g. "M" for tops, "US 8" for shoes, "W30 L30" for bottoms, "One Size" for cardigans/oversized) — partial matches may occur across categories i.e. size "8" can match shoes and bottoms. Pass None to skip. |
+| `max_price` | float or None | No | Maximum price inclusive. Pass None to skip. |
 
 **What it returns:**
 <!-- Describe the return value — what fields does a result contain? -->
+A ranked list of matching listing dicts sorted by keyword relevance score, each containing: id, title, description, category, style_tags, size, condition, price, colors, brand, platform. Returns an empty list if nothing matches.
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if no listings match? -->
+If an empty list is returned, the LLM stops the planning loop, sets `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords.", and returns the session early without calling `suggest_outfit` or `create_fit_card`.
 
 ---
 
@@ -35,17 +72,33 @@ You must have at least 3 tools. The three required tools are listed — add any 
 
 **What it does:**
 <!-- Describe what this tool does in 1–2 sentences -->
+Given a thrifted item and the user's wardrobe, calls the LLM to suggest 1–2 complete outfit combinations. If the wardrobe is empty, returns general styling advice instead.
+
+**System prompt (non-empty wardrobe):**
+```
+You are a personal stylist. Given the thrift item and the user's wardrobe below, suggest 1–2 complete outfit combinations using specific named pieces from the wardrobe. If any key categories (tops, bottoms, shoes) are missing from the wardrobe, mention what type of piece would complete the look.
+```
+
+**System prompt (empty wardrobe):**
+```
+You are a personal stylist. Given the thrift item below, suggest general styling ideas — what types of pieces pair well with it, what vibe it suits, and how to build an outfit around it.
+```
 
 **Input parameters:**
 <!-- List each parameter, its type, and what it represents -->
-- `new_item` (dict): ...
-- `wardrobe` (dict): ...
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `new_item` | dict | Yes | The selected listing dict from search_listings (the item the user is considering buying) |
+| `wardrobe` | dict | Yes | The user's wardrobe dict with an `items` key containing a list of wardrobe item dicts. May be empty. |
 
 **What it returns:**
 <!-- Describe the return value -->
+A non-empty string with outfit suggestions. If wardrobe is non-empty, suggestions reference specific named pieces from the wardrobe and flag any missing categories (tops, bottoms, shoes). If wardrobe is empty, returns general styling advice for the new item.
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the wardrobe is empty or no outfit can be suggested? -->
+If `wardrobe["items"]` is empty, the LLM is prompted for general styling advice rather than wardrobe-specific combinations — the tool always returns a non-empty string and does not stop the loop. The LLM proceeds to call `create_fit_card` with whatever string is returned.
 
 ---
 
@@ -53,16 +106,28 @@ You must have at least 3 tools. The three required tools are listed — add any 
 
 **What it does:**
 <!-- Describe what this tool does in 1–2 sentences -->
+Given an outfit suggestion and the thrifted item, calls the LLM to generate a short, shareable caption styled like an Instagram OOTD post.
+
+**System prompt:**
+```
+You are a fashion-forward social media writer. Given the outfit suggestion and thrift item below, pick the single most interesting outfit combination and write a 2–4 sentence Instagram caption for it. Make it casual and authentic — like a real OOTD post, not a product description. Mention the item name, price, and platform naturally. Capture the outfit vibe in specific terms. Sound different each time.
+```
 
 **Input parameters:**
 <!-- List each parameter, its type, and what it represents -->
-- `outfit` (...): ...
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `outfit` | str | Yes | The outfit suggestion string returned by suggest_outfit |
+| `new_item` | dict | Yes | The selected listing dict (used for item name, price, and platform in the caption) |
 
 **What it returns:**
 <!-- Describe the return value -->
+A 2–4 sentence string styled as a casual Instagram/TikTok caption. Mentions the item name, price, and platform once each. Returns a descriptive error string if `outfit` is empty or whitespace — does not raise an exception.
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the outfit data is incomplete? -->
+If `outfit` is empty or whitespace, the tool sets `session["error"]` to "Something went wrong generating your fit card. Please try your search again." and signals the LLM to stop the loop without calling any further tools. The session is returned early with `fit_card` as None, and `app.py` surfaces the error in panel 1 with panels 2 and 3 left empty.
 
 ---
 
@@ -95,6 +160,9 @@ For each tool, describe the specific failure mode you're handling and what the a
 | search_listings | No results match the query | |
 | suggest_outfit | Wardrobe is empty | |
 | create_fit_card | Outfit input is missing or incomplete | |
+
+**General exception handling:**
+The entire `run_agent()` body is wrapped in a `try/except Exception` — any unhandled exception (e.g. file I/O error from `load_listings()`, Groq API failure) is caught and surfaced through `session["error"]` rather than crashing the app.
 
 ---
 
