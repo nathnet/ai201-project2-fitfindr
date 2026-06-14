@@ -174,7 +174,8 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
                 "No listings found matching your description. Try broadening your search — "
                 "remove the size or price filter, or use different keywords."
             )
-        return json.dumps(results)
+        # Return only top 3 results to keep token usage low — full results are in session.
+        return json.dumps(results[:3])
 
     if name == "suggest_outfit":
         outfit = suggest_outfit(session["selected_item"], session["wardrobe"])
@@ -192,6 +193,20 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
 
     session["error"] = f"Unknown tool called: {name}"
     return ""
+
+
+# ── constants ────────────────────────────────────────────────────────────────
+
+MAX_ITERATIONS = 5
+
+SYSTEM_PROMPT = (
+    "You are FitFindr, a thrift shopping assistant. Given a user's query, use the available tools to:\n"
+    "1. Search for matching thrift listings\n"
+    "2. Suggest an outfit using the found item and the user's wardrobe\n"
+    "3. Generate a shareable fit card caption\n\n"
+    "Call tools in order. If search returns no results, stop and inform the user.\n"
+    "Only call suggest_outfit and create_fit_card if a listing was found."
+)
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────
@@ -212,7 +227,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
         first — if it is not None, the interaction ended early and the other
         output fields (outfit_suggestion, fit_card) will be None.
 
-    TODO — implement this function using the planning loop you designed in planning.md:
+    Done - implement this function using the planning loop you designed in planning.md:
 
         Step 1: Initialize the session with _new_session().
 
@@ -241,9 +256,54 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     Before writing code, complete the Planning Loop and State Management sections
     of planning.md — your implementation should match what you described there.
     """
-    # TODO: implement the planning loop
     session = _new_session(query, wardrobe)
-    session["error"] = "Planning loop not yet implemented."
+
+    try:
+        client = _get_groq_client()
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": query},
+        ]
+
+        for iteration in range(MAX_ITERATIONS):
+            print(f"[FitFindr] Iteration {iteration + 1}/{MAX_ITERATIONS}")
+            if session["error"]:
+                return session
+
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                tools=TOOL_DEFINITIONS,
+                tool_choice="auto",
+            )
+
+            message = response.choices[0].message
+
+            if not message.tool_calls:
+                print("[FitFindr] No tool calls — loop complete")
+                return session
+
+            # Append assistant message with tool calls to history
+            messages.append(message)
+
+            for tool_call in message.tool_calls:
+                print(f"[FitFindr] Calling tool: {tool_call.function.name}")
+                result = dispatch_tool(tool_call, session)
+                print(f"[FitFindr] Tool result: {result}")
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": result,
+                })
+                if session["error"]:
+                    return session
+
+        session["error"] = "FitFindr ran into an issue and couldn't complete your request. Please try again."
+
+    except Exception as e:
+        print(f"[FitFindr] Unexpected error: {e}")
+        session["error"] = "FitFindr ran into an unexpected error. Please try again."
+
     return session
 
 

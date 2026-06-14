@@ -7,5 +7,4 @@ load_dotenv()
 
 # Generation
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = "qwen/qwen3-32b"
-HISTORY_TURNS = 3
+GROQ_MODEL = "llama-3.3-70b-versatile"
