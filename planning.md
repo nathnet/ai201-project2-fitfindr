@@ -127,7 +127,9 @@ A 2–4 sentence string styled as a casual Instagram/TikTok caption. Mentions th
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the outfit data is incomplete? -->
-If `outfit` is empty or whitespace, the tool sets `session["error"]` to "Something went wrong generating your fit card. Please try your search again." and signals the LLM to stop the loop without calling any further tools. The session is returned early with `fit_card` as None, and `app.py` surfaces the error in panel 1 with panels 2 and 3 left empty.
+If `outfit` is empty or whitespace, the tool returns a descriptive error string without calling the LLM. `run_agent()` routes the result by checking the `outfit` input: if empty or whitespace, the return value goes into `session["error"]`; otherwise into `session["fit_card"]`. The session is returned early with `fit_card` as None, and `app.py` surfaces the error in panel 1 with panels 2 and 3 left empty.
+
+**Limitation:** the tool returns `str` in both success and failure paths — the assignment's required signature prevents returning `None` (the idiomatic Python failure signal). `run_agent()` must therefore check the input, not the output, to distinguish an error from a valid caption.
 
 ---
 
@@ -186,7 +188,7 @@ For each tool, describe the specific failure mode you're handling and what the a
 |------|-------------|----------------|
 | search_listings | No results match the query | Set `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords." Stop the loop immediately. Do not call `suggest_outfit` or `create_fit_card`. Return the session. |
 | suggest_outfit | Wardrobe is empty | Do not stop the loop. Check `wardrobe["items"]` — if empty, switch to the empty-wardrobe system prompt for general styling advice. Call the LLM and return the response string as normal. The loop continues to `create_fit_card`. |
-| create_fit_card | Outfit input is missing or incomplete | Check if `outfit` is empty or whitespace before calling the LLM. If so, set `session["error"]` to "Something went wrong generating your fit card. Please try your search again." Stop the loop. Return the session with `fit_card` as None. |
+| create_fit_card | Outfit input is missing or incomplete | The tool returns a descriptive error string without calling the LLM. `run_agent()` checks the `outfit` input after the call: if empty or whitespace, the return value is routed to `session["error"]`; otherwise to `session["fit_card"]`. Loop stops and session is returned with `fit_card` as None. |
 
 **General exception handling:**
 The entire `run_agent()` body is wrapped in a `try/except Exception` — any unhandled exception (e.g. file I/O error from `load_listings()`, Groq API failure) is caught and surfaced through `session["error"]` rather than crashing the app.

@@ -13,10 +13,12 @@ Tools:
 """
 
 import os
+import re
 
 from dotenv import load_dotenv
 from groq import Groq
 
+from config import GROQ_MODEL
 from utils.data_loader import load_listings
 
 load_dotenv()
@@ -32,6 +34,30 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+# ── Prompt constants ─────────────────────────────────────────────────────────
+
+SUGGEST_OUTFIT_PROMPT_WARDROBE = (
+    "You are a personal stylist. Given the thrift item and the user's wardrobe below, suggest 1–2 "
+    "complete outfit combinations that each include the new thrift item paired with specific named pieces "
+    "from the wardrobe. If any key categories (tops, bottoms, shoes) are missing from the wardrobe, "
+    "mention what type of piece would complete the look."
+)
+
+SUGGEST_OUTFIT_PROMPT_GENERAL = (
+    "You are a personal stylist. Given the thrift item below, suggest general styling advice — "
+    "what types of pieces pair well with it based on its category, what vibe it suits, "
+    "and how to build an outfit around it."
+)
+
+CREATE_FIT_CARD_PROMPT = (
+    "You are a fashion-forward social media writer. Given the outfit suggestion and thrift item below, "
+    "pick the single most interesting outfit combination and write a 2–4 sentence Instagram caption for it. "
+    "Make it casual and authentic — like a real OOTD post, not a product description. "
+    "Mention the item name, price, and platform naturally. "
+    "Capture the outfit vibe in specific terms. Sound different each time."
+)
 
 
 # ── Tool 1: search_listings ───────────────────────────────────────────────────
@@ -69,8 +95,29 @@ def search_listings(
 
     Before writing code, fill in the Tool 1 section of planning.md.
     """
-    # Replace this with your implementation
-    return []
+    listings = load_listings()
+
+    if max_price is not None:
+        listings = [listing for listing in listings if listing["price"] <= max_price]
+    if size is not None:
+        listings = [listing for listing in listings if size.lower() in listing["size"].lower()]
+
+    query_keywords = set(re.findall(r"\b\w+\b", description.lower()))
+
+    scored_listings = []
+    for listing in listings:
+        listing_desc_words = set(re.findall(r"\b\w+\b", listing["description"].lower()))
+        desc_score = sum(1 for keyword in query_keywords if keyword in listing_desc_words)
+
+        listing_tag_words = set(re.findall(r"\b\w+\b", " ".join(listing["style_tags"]).lower()))
+        tag_score = sum(2 for keyword in query_keywords if keyword in listing_tag_words)
+
+        total_score = desc_score + tag_score
+        if total_score > 0:
+            scored_listings.append((total_score, listing))
+
+    scored_listings.sort(key=lambda x: x[0], reverse=True)
+    return [listing for _, listing in scored_listings]
 
 
 # ── Tool 2: suggest_outfit ────────────────────────────────────────────────────
@@ -100,8 +147,41 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    client = _get_groq_client()
+
+    item_text = (
+        f"New thrift item: {new_item['title']}\n"
+        f"- Category: {new_item['category']}\n"
+        f"- Description: {new_item['description']}\n"
+        f"- Colors: {', '.join(new_item['colors'])}\n"
+        f"- Style tags: {', '.join(new_item['style_tags'])}\n"
+        f"- Size: {new_item['size']}\n"
+        f"- Condition: {new_item['condition']}\n"
+        f"- Price: ${new_item['price']:.2f} on {new_item['platform']}\n"
+    )
+
+    if not wardrobe["items"]:
+        system_prompt = SUGGEST_OUTFIT_PROMPT_GENERAL
+        user_message = item_text
+    else:
+        system_prompt = SUGGEST_OUTFIT_PROMPT_WARDROBE
+        wardrobe_lines = "\n".join(
+            f"- {item['name']} ({item['category']}) — colors: {', '.join(item['colors'])}"
+            f" — style: {', '.join(item['style_tags'])}"
+            + (f" — notes: {item['notes']}" if item.get("notes") else "")
+            for item in wardrobe["items"]
+        )
+        user_message = f"{item_text}\nUser's wardrobe:\n{wardrobe_lines}"
+
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+    )
+
+    return response.choices[0].message.content
 
 
 # ── Tool 3: create_fit_card ───────────────────────────────────────────────────
@@ -133,5 +213,26 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     Before writing code, fill in the Tool 3 section of planning.md.
     """
-    # Replace this with your implementation
-    return ""
+    if not outfit or not outfit.strip():
+        return "Something went wrong generating your fit card. Please try your search again."
+
+    client = _get_groq_client()
+
+    item_details = (
+        f"Item: {new_item['title']}\n"
+        f"Price: ${new_item['price']:.2f}\n"
+        f"Platform: {new_item['platform']}\n"
+    )
+
+    user_message = f"{item_details}\nOutfit suggestion:\n{outfit}"
+
+    response = client.chat.completions.create(
+        model=GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": CREATE_FIT_CARD_PROMPT},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=1.0,
+    )
+
+    return response.choices[0].message.content
