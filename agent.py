@@ -174,8 +174,8 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
                 "No listings found matching your description. Try broadening your search — "
                 "remove the size or price filter, or use different keywords."
             )
-        # Return only top 3 results to keep token usage low — full results are in session.
-        return json.dumps(results[:3])
+        # Return only the top result to keep token usage low — full results are in session.
+        return json.dumps(results[:1])
 
     if name == "suggest_outfit":
         outfit = suggest_outfit(session["selected_item"], session["wardrobe"])
@@ -200,12 +200,14 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
 MAX_ITERATIONS = 5
 
 SYSTEM_PROMPT = (
-    "You are FitFindr, a thrift shopping assistant. Given a user's query, use the available tools to:\n"
-    "1. Search for matching thrift listings\n"
-    "2. Suggest an outfit using the found item and the user's wardrobe\n"
-    "3. Generate a shareable fit card caption\n\n"
-    "Call tools in order. If search returns no results, stop and inform the user.\n"
-    "Only call suggest_outfit and create_fit_card if a listing was found."
+    "You are FitFindr, a thrift shopping assistant. Use the available tools to help the user find a "
+    "secondhand item and build an outfit around it.\n\n"
+    "You are done only when you have all three of the following ready for the user:\n"
+    "- A matching thrift listing\n"
+    "- An outfit suggestion for that item\n"
+    "- An Instagram-style fit card caption\n\n"
+    "Do not give a final response until all three are ready. "
+    "If search returns no results, stop and inform the user — there is nothing to style."
 )
 
 

@@ -43,14 +43,14 @@ SUGGEST_OUTFIT_PROMPT_WARDROBE = (
     "complete outfit combinations that each include the new thrift item paired with specific named pieces "
     "from the wardrobe. If any key categories (tops, bottoms, shoes) are missing from the wardrobe, "
     "mention what type of piece would complete the look. "
-    "Be concise — 3–5 sentences per outfit, no bullet points."
+    "Be concise — 3–5 sentences per outfit. Plain text only — no bullet points, no headers, no markdown."
 )
 
 SUGGEST_OUTFIT_PROMPT_GENERAL = (
     "You are a personal stylist. Given the thrift item below, suggest general styling advice — "
     "what types of pieces pair well with it based on its category, what vibe it suits, "
     "and how to build an outfit around it. "
-    "Be concise — 3–5 sentences, no bullet points."
+    "Be concise — 3–5 sentences. Plain text only — no bullet points, no headers, no markdown."
 )
 
 CREATE_FIT_CARD_PROMPT = (
@@ -58,7 +58,8 @@ CREATE_FIT_CARD_PROMPT = (
     "pick the single most interesting outfit combination and write a 2–4 sentence Instagram caption for it. "
     "Make it casual and authentic — like a real OOTD post, not a product description. "
     "Mention the item name, price, and platform naturally. "
-    "Capture the outfit vibe in specific terms. Sound different each time."
+    "Capture the outfit vibe in specific terms. Sound different each time. "
+    "Output the caption text only — no headers, no labels, no preamble."
 )
 
 
