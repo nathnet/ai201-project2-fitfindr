@@ -18,7 +18,104 @@ Usage (once implemented):
     print(result["error"])   # None on success
 """
 
-from tools import search_listings, suggest_outfit, create_fit_card
+import json
+
+from groq.types.chat import ChatCompletionMessageToolCall
+
+from config import GROQ_MODEL
+from tools import _get_groq_client, create_fit_card, search_listings, suggest_outfit
+
+
+# ── tool definitions ──────────────────────────────────────────────────────────
+
+TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_listings",
+            "description": (
+                "Search thrift listings by description with optional size and price filters. "
+                "Returns a ranked list of matching listings sorted by keyword relevance. "
+                "Use this first whenever the user asks about finding a thrift item."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "description": {
+                        "type": "string",
+                        "description": "Keywords describing the item (e.g. 'vintage graphic tee')",
+                    },
+                    "size": {
+                        "type": ["string", "null"],
+                        "description": (
+                            "Size to filter by. Formats vary by category — "
+                            "tops/outerwear: letter sizes (e.g. 'S', 'M', 'L', 'XL', 'S/M', 'M/L', 'L/XL', "
+                            "'XL (oversized)', 'XL (fits oversized)', 'One Size', 'One Size / Oversized', 'Oversized'); "
+                            "bottoms: waist only (e.g. 'W27', 'W28', 'W29', 'W30', 'W32') or waist/length (e.g. 'W30 L30'); "
+                            "shoes: US sizing (e.g. 'US 7', 'US 8', 'US 8.5', 'US 9'). "
+                            "Pass the size closest to what the user states. Pass null if no size is mentioned."
+                        ),
+                    },
+                    "max_price": {
+                        "type": ["number", "null"],
+                        "description": "Maximum price inclusive. Pass null to skip.",
+                    },
+                },
+                "required": ["description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "suggest_outfit",
+            "description": (
+                "Given a thrifted item and the user's wardrobe, suggest 1–2 complete outfit "
+                "combinations. If the wardrobe is empty, returns general styling advice instead. "
+                "Use this after search_listings returns at least one result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "new_item": {
+                        "type": "object",
+                        "description": "The selected listing dict from search_listings.",
+                    },
+                    "wardrobe": {
+                        "type": "object",
+                        "description": "The user's wardrobe dict with an 'items' key.",
+                    },
+                },
+                "required": ["new_item", "wardrobe"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_fit_card",
+            "description": (
+                "Generate a 2–4 sentence Instagram-style caption for the thrifted outfit. "
+                "Mentions the item name, price, and platform naturally. "
+                "Use this after suggest_outfit returns an outfit suggestion."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "outfit": {
+                        "type": "string",
+                        "description": "The outfit suggestion string returned by suggest_outfit.",
+                    },
+                    "new_item": {
+                        "type": "object",
+                        "description": "The selected listing dict (for item name, price, and platform).",
+                    },
+                },
+                "required": ["outfit", "new_item"],
+            },
+        },
+    },
+]
 
 
 # ── session state ─────────────────────────────────────────────────────────────
@@ -43,6 +140,58 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
     }
+
+
+# ── tool dispatch ────────────────────────────────────────────────────────────
+
+def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> str:
+    """
+    Execute a single tool call and update the session in place.
+
+    Returns the tool result as a string for appending to the message history.
+    Sets session["error"] on failure — caller should check after each dispatch.
+    """
+    name = tool_call.function.name
+    args = json.loads(tool_call.function.arguments or "{}")
+    if not isinstance(args, dict):
+        args = {}
+
+    if name == "search_listings":
+        session["parsed"] = {
+            "description": args.get("description"),
+            "size": args.get("size"),
+            "max_price": args.get("max_price"),
+        }
+        results = search_listings(
+            description=session["parsed"]["description"],
+            size=session["parsed"]["size"],
+            max_price=session["parsed"]["max_price"],
+        )
+        session["search_results"] = results
+        session["selected_item"] = results[0] if results else None
+        if not results:
+            session["error"] = (
+                "No listings found matching your description. Try broadening your search — "
+                "remove the size or price filter, or use different keywords."
+            )
+        return json.dumps(results)
+
+    if name == "suggest_outfit":
+        outfit = suggest_outfit(session["selected_item"], session["wardrobe"])
+        session["outfit_suggestion"] = outfit
+        return outfit
+
+    if name == "create_fit_card":
+        outfit = session["outfit_suggestion"]
+        fit_card = create_fit_card(outfit, session["selected_item"])
+        if not outfit or not outfit.strip():
+            session["error"] = fit_card
+        else:
+            session["fit_card"] = fit_card
+        return fit_card
+
+    session["error"] = f"Unknown tool called: {name}"
+    return ""
 
 
 # ── planning loop ─────────────────────────────────────────────────────────────

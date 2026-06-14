@@ -147,6 +147,11 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
 
     Before writing code, fill in the Tool 2 section of planning.md.
     """
+    # Raises rather than returns an error string — empty new_item is a
+    # programmatic failure; this function is not meant to be called without a valid item.
+    if not new_item:
+        raise ValueError("suggest_outfit called with empty new_item")
+
     client = _get_groq_client()
 
     item_text = (
