@@ -270,7 +270,15 @@ Return session ◄────────────────────�
 
 **Milestone 3 — Individual tool implementations:**
 
+- **search_listings:** Give Claude Code the Tool 1 section (What it does, input table, return value, failure mode) and ask it to implement using `load_listings()`. Verify the generated code filters by all three parameters, weights style_tags higher than description, drops zero-score listings, and sorts descending. Test with direct function calls covering: (1) description only, (2) description + max_price only, (3) description + size only, (4) all three params, (5) a query that should return empty.
+- **suggest_outfit:** Give Claude Code the Tool 2 section plus both system prompts. Verify the code branches on `wardrobe["items"]` being empty, calls the LLM with the correct prompt for each branch, and always returns a non-empty string. Test with direct function calls covering: (1) a valid item with example wardrobe, (2) a valid item with empty wardrobe.
+- **create_fit_card:** Give Claude Code the Tool 3 section plus its system prompt. Verify the empty/whitespace outfit guard is present, the LLM call uses higher temperature, and the output mentions item name, price, and platform. Test with direct function calls covering: (1) a valid outfit string, (2) an empty string, (3) a whitespace-only string.
+
 **Milestone 4 — Planning loop and state management:**
+
+- **TOOL_DEFINITIONS:** Give Claude Code the input parameter tables for all three tools from the Tools section. Ask it to produce the Groq-compatible JSON schema definitions for each tool. Verify each definition matches the parameter names, types, and required fields in the spec.
+- **run_agent() loop:** Give Claude Code the Initial LLM Call section, Planning Loop section, State Management section, and the Architecture diagram. Ask it to implement the LLM-driven loop with Groq tool calling. Verify: message history is appended correctly each iteration, early exit on empty search results sets `session["error"]` and returns without calling remaining tools, and the max iteration guard is present. Test using the two CLI cases already in `agent.py` — happy path and no-results path.
+- **handle_query():** Give Claude Code the `app.py` TODO comments and the State Management section. Ask it to implement `handle_query()`. Verify: empty query is caught early, wardrobe is selected correctly based on `wardrobe_choice`, `session["error"]` routes to panel 1 with panels 2 and 3 empty, and success routes all three fields to the correct panels. Test by running `app.py` and submitting both a valid query and the deliberate no-results example query.
 
 ---
 
@@ -287,8 +295,9 @@ The captured requirements are "vintage graphic tee", "<=$30", missing size.
 
 The LLM then looks at the information it needs and calls tool to search for listings user can buy.
 Agent calls search_listings(description="vintage graphic tee", max_price=30.0).
-The tool returns listings matching the description and price range, 
-sorted by relevance from keyword overlap.
+The tool returns a ranked list of listing dicts sorted by keyword relevance score. The tool result
+is appended to messages and session["search_results"] is set to the returned list.
+session["selected_item"] is set to results[0] — e.g. {title: "Vintage Graphic Tee", price: 24.0, platform: "Depop", ...}.
 
 **Step 2:**
 <!-- What happens next? What was returned from step 1? What tool is called now? -->
@@ -308,8 +317,13 @@ LLM suggests based on the wardrobe and offers a general styling for the missing 
 This case is part of the non-empty wardrobe prompt.
 c.) If the wardrobe is empty, LLM offers a general styling advice for the new item.
 
-Afterwards, LLM calls tool create_fit_card(suggestion, selected_item). The tool returns a short, 
-shareable description, similar to an instagram post caption.
+The outfit suggestion string is stored in session["outfit_suggestion"] and the tool result is 
+appended to messages. The LLM then calls create_fit_card(outfit_suggestion, selected_item),
+passing the full suggestion string and the selected listing dict.
+The tool returns a 2-4 sentence Instagram-style caption — e.g. "Thrifted this faded graphic tee 
+on Depop for $24 and I'm obsessed. Styled it with my baggy jeans and chunky sneakers for the 
+ultimate 90s throwback look. This one's staying in rotation."
+The caption is stored in session["fit_card"].
 
 **Final output to user:**
 <!-- What does the user actually see at the end? -->
