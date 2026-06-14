@@ -141,6 +141,20 @@ If `outfit` is empty or whitespace, the tool sets `session["error"]` to "Somethi
 
 **How does your agent decide which tool to call next?**
 <!-- Describe the logic your planning loop uses. What does it look at? What conditions change its behavior? How does it know when it's done? -->
+The planning loop is LLM-driven. The first call is initialized with just the system prompt and the user's message. On each subsequent iteration, the full message history (including previous tool calls and results) is passed to the LLM with `tool_choice="auto"`.
+
+The LLM decides which tool to call next based on the message history:
+- No search result yet → calls `search_listings`
+- Listing found, no outfit yet → calls `suggest_outfit`
+- Outfit found, no fit card yet → calls `create_fit_card`
+- Fit card done → returns a final response with no tool calls → loop exits
+
+**Early exits:**
+- `search_listings` returns empty results → set `session["error"]`, call no further tools, return session immediately
+- `create_fit_card` receives an empty outfit string → set `session["error"]`, call no further tools, return session immediately
+
+**Loop termination:**
+The loop exits when the LLM returns a response with no `tool_calls`. A max iteration guard of **5** is set (3 required tools + 2 buffer, increasing as new tools are introduced). If the guard is hit, `session["error"]` is set to a generic failure message and the session is returned.
 
 ---
 
@@ -148,6 +162,19 @@ If `outfit` is empty or whitespace, the tool sets `session["error"]` to "Somethi
 
 **How does information from one tool get passed to the next?**
 <!-- Describe how your agent stores and accesses state within a session. What data is tracked? How is it passed between tool calls? -->
+Each call to `run_agent()` creates a fresh session dict via `_new_session()`. The session is the single source of truth for all state within one interaction and is never shared across calls.
+
+| Field | Set by | Used by |
+|---|---|---|
+| `query` | `_new_session()` | LLM initial message |
+| `wardrobe` | `_new_session()` | `suggest_outfit` |
+| `search_results` | `search_listings` result | agent to select `selected_item` |
+| `selected_item` | agent (top of `search_results`) | `suggest_outfit`, `create_fit_card` |
+| `outfit_suggestion` | `suggest_outfit` result | `create_fit_card` |
+| `fit_card` | `create_fit_card` result | `app.py` (panel 3) |
+| `error` | early exit or exception handler | `app.py` (panel 1) |
+
+Tool results are also appended to the `messages` list each iteration so the LLM can read them in the next loop. The session dict is the Python-side record used to populate the Gradio UI on return; the message history is the LLM-side record used to drive tool selection.
 
 ---
 
@@ -157,9 +184,9 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No results match the query | |
-| suggest_outfit | Wardrobe is empty | |
-| create_fit_card | Outfit input is missing or incomplete | |
+| search_listings | No results match the query | Set `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords." Stop the loop immediately. Do not call `suggest_outfit` or `create_fit_card`. Return the session. |
+| suggest_outfit | Wardrobe is empty | Do not stop the loop. Check `wardrobe["items"]` — if empty, switch to the empty-wardrobe system prompt for general styling advice. Call the LLM and return the response string as normal. The loop continues to `create_fit_card`. |
+| create_fit_card | Outfit input is missing or incomplete | Check if `outfit` is empty or whitespace before calling the LLM. If so, set `session["error"]` to "Something went wrong generating your fit card. Please try your search again." Stop the loop. Return the session with `fit_card` as None. |
 
 **General exception handling:**
 The entire `run_agent()` body is wrapped in a `try/except Exception` — any unhandled exception (e.g. file I/O error from `load_listings()`, Groq API failure) is caught and surfaced through `session["error"]` rather than crashing the app.
@@ -176,6 +203,55 @@ The entire `run_agent()` body is wrapped in a `try/except Exception` — any unh
      ASCII art, a Mermaid diagram (https://mermaid.js.org/syntax/flowchart.html), or an embedded
      sketch are all fine. You'll share this diagram with an AI tool when asking it to implement
      the planning loop and each individual tool. -->
+
+```
+User query + wardrobe choice
+    │
+    ▼
+Gradio UI (handle_query)
+    │ user_query, wardrobe
+    ▼
+Planning Loop (run_agent)
+    │
+    ▼
+LLM Call (messages + TOOL_DEFINITIONS, tool_choice="auto") ◄─────────┐
+    │                                                                │
+    ├─► search_listings(description, size, max_price)                │
+    │       │                                                        │
+    │       ├──────────────results=[]──────────────────────────────────────► [ERROR] set session["error"] → return early ──┐
+    │       │                                                        │                                                     │
+    │       │ results=[...]                                          │                                                     │
+    │       ▼                                                        │                                                     │
+    │   session["search_results"]=results                            │                                                     │
+    │   session["selected_item"]=results[0]                          │                                                     │
+    │       │ tool result appended to messages                       │                                                     │
+    │       └───────────────────────────────────────────────────────►┤                                                     │
+    │                                                                │                                                     │
+    ├─► suggest_outfit(selected_item, wardrobe)                      │                                                     │
+    │       │ wardrobe["items"]=[] → LLM: general styling advice     │                                                     │
+    │       │ wardrobe["items"]!=[] → LLM: wardrobe-based suggestion │                                                     │
+    │       ▼                                                        │                                                     │
+    │   session["outfit_suggestion"]="..."                           │                                                     │
+    │       │ tool result appended to messages                       │                                                     │
+    │       └───────────────────────────────────────────────────────►┤                                                     │
+    │                                                                │                                                     │
+    ├─► create_fit_card(outfit_suggestion, selected_item)            │                                                     │
+    │       │                                                        │                                                     │
+    │       ├──────────────outfit empty/whitespace─────────────────────────► [ERROR] set session["error"] → return early ──┤
+    │       │                                                        │                                                     │
+    │       │ outfit valid                                           │                                                     │
+    │       ▼                                                        │                                                     │
+    │   session["fit_card"]="..."                                    │                                                     │
+    │       │ tool result appended to messages                       │                                                     │
+    │       │                                                        │                                                     │
+    │       └───────────────────────────────────────────────────────►┘                                                     │
+    │ LLM returns no tool_calls → exit loop                                                                                │
+    ▼                                                                                                                      │
+Return session ◄───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+    │
+    ├─ error set → Panel 1: error msg  | Panel 2: empty   | Panel 3: empty
+    └─ success  → Panel 1: listing     | Panel 2: outfit  | Panel 3: fit card
+```
 
 ---
 
