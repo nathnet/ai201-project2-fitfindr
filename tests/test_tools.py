@@ -1,16 +1,18 @@
-"""tests/test_tools.py — unit tests for the three FitFindr tools.
+"""tests/test_tools.py — unit tests for the four FitFindr tools.
 
 Run from the project root:
     pytest tests/
 """
 
-import pytest
 from unittest.mock import MagicMock, patch
+import pytest
 
 from tools import (
+    COMPARE_PRICE_PROMPT,
     CREATE_FIT_CARD_PROMPT,
     SUGGEST_OUTFIT_PROMPT_GENERAL,
     SUGGEST_OUTFIT_PROMPT_WARDROBE,
+    compare_price,
     create_fit_card,
     search_listings,
     suggest_outfit,
@@ -115,12 +117,19 @@ def test_suggest_outfit_empty_wardrobe_uses_general_prompt():
     assert result == "This piece pairs well with wide-leg trousers."
 
 
+def test_suggest_outfit_empty_item_raises():
+    with pytest.raises(ValueError, match="suggest_outfit called with empty new_item"):
+        suggest_outfit({}, SAMPLE_WARDROBE)
+
+
 # ── create_fit_card ───────────────────────────────────────────────────────────
 
 def test_create_fit_card_valid_outfit_calls_llm():
     mock = _mock_client("Thrifted this butterfly tee on depop for $18 and I'm obsessed.")
     with patch("tools._get_groq_client", return_value=mock):
         result = create_fit_card("Pair with baggy jeans and chunky sneakers.", SAMPLE_ITEM)
+    system_prompt = mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+    assert system_prompt == CREATE_FIT_CARD_PROMPT
     assert result == "Thrifted this butterfly tee on depop for $18 and I'm obsessed."
     mock.chat.completions.create.assert_called_once()
 
@@ -132,3 +141,29 @@ def test_create_fit_card_bad_outfit_input(bad_outfit_input):
         result = create_fit_card(bad_outfit_input, SAMPLE_ITEM)
     assert result == "Something went wrong generating your fit card. Please try your search again."
     mock.chat.completions.create.assert_not_called()
+
+
+# ── compare_price ─────────────────────────────────────────────────────────────
+
+def test_compare_price_calls_llm_with_comparables():
+    mock = _mock_client("At $18.00, this top is priced below the $22.00 average for similar tops.")
+    with patch("tools._get_groq_client", return_value=mock):
+        result = compare_price(SAMPLE_ITEM)
+    system_prompt = mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
+    assert system_prompt == COMPARE_PRICE_PROMPT
+    assert result == "At $18.00, this top is priced below the $22.00 average for similar tops."
+    mock.chat.completions.create.assert_called_once()
+
+
+def test_compare_price_no_comparables_skips_llm():
+    isolated_item = {**SAMPLE_ITEM, "style_tags": ["zzz-nonexistent-tag"]}
+    mock = _mock_client("should not be reached")
+    with patch("tools._get_groq_client", return_value=mock):
+        result = compare_price(isolated_item)
+    assert result == f"No comparable {isolated_item['category']} listings found to assess this price."
+    mock.chat.completions.create.assert_not_called()
+
+
+def test_compare_price_empty_item_raises():
+    with pytest.raises(ValueError, match="compare_price called with empty item"):
+        compare_price({})
