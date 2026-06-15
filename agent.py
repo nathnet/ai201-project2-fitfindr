@@ -24,7 +24,7 @@ from groq import BadRequestError
 from groq.types.chat import ChatCompletionMessageToolCall
 
 from config import GROQ_MODEL
-from tools import _chat, create_fit_card, search_listings, suggest_outfit
+from tools import _chat, compare_price, create_fit_card, search_listings, suggest_outfit
 
 
 # ── tool definitions ──────────────────────────────────────────────────────────
@@ -63,6 +63,27 @@ TOOL_DEFINITIONS = [
                     },
                 },
                 "required": ["description"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "compare_price",
+            "description": (
+                "Compare the price of a thrift listing against similar items in the dataset. "
+                "Returns a 2–3 sentence price assessment with reasoning based on comparable listings. "
+                "Use this after search_listings returns at least one result."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item": {
+                        "type": "object",
+                        "description": "The selected listing dict from search_listings.",
+                    },
+                },
+                "required": ["item"],
             },
         },
     },
@@ -138,6 +159,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "selected_item": None,       # top result, passed into suggest_outfit
         "wardrobe": wardrobe,        # user's wardrobe dict
         "outfit_suggestion": None,   # string returned by suggest_outfit
+        "price_assessment": "",       # string returned by compare_price
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
         "retry_note": "",             # appended to if search was retried with loosened filters
@@ -206,6 +228,11 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
             payload["note"] = session["retry_note"].strip()
         return json.dumps(payload)
 
+    if name == "compare_price":
+        assessment = compare_price(session["selected_item"])
+        session["price_assessment"] = assessment
+        return assessment
+
     if name == "suggest_outfit":
         outfit = suggest_outfit(session["selected_item"], session["wardrobe"])
         session["outfit_suggestion"] = outfit
@@ -230,11 +257,12 @@ MAX_ITERATIONS = 5
 
 SYSTEM_PROMPT = (
     "You are FitFindr, a thrift shopping assistant. "
-    "You are done when you have all three of the following ready for the user:\n\n"
+    "You are done when you have all four of the following ready for the user:\n\n"
     "1. A thrift listing that matches the user's request.\n"
-    "2. An outfit suggestion built around that listing.\n"
-    "3. An Instagram-style fit card caption for the outfit.\n\n"
-    "Finding the listing is only the first step — all three must be ready before the task is done. "
+    "2. A price assessment showing how the listing's price compares to similar items.\n"
+    "3. An outfit suggestion built around that listing.\n"
+    "4. An Instagram-style fit card caption for the outfit.\n\n"
+    "Finding the listing is only the first step — all four must be ready before the task is done. "
     "If search returns no results, the task is complete — inform the user there is nothing to style. "
     "If the search result includes a 'note' field, the filters were already relaxed to find "
     "the best available match — treat the returned listing as the working item."

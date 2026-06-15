@@ -13,14 +13,15 @@ The planning loop is driven by the LLM. On each iteration, the agent calls Groq 
 
 **System prompt:**
 ```
-You are FitFindr, a thrift shopping assistant. You are done when you have all three of the
+You are FitFindr, a thrift shopping assistant. You are done when you have all four of the
 following ready for the user:
 
 1. A thrift listing that matches the user's request.
-2. An outfit suggestion built around that listing.
-3. An Instagram-style fit card caption for the outfit.
+2. A price assessment showing how the listing's price compares to similar items.
+3. An outfit suggestion built around that listing.
+4. An Instagram-style fit card caption for the outfit.
 
-Finding the listing is only the first step — all three must be ready before the task is done.
+Finding the listing is only the first step — all four must be ready before the task is done.
 If search returns no results, the task is complete — inform the user there is nothing to style.
 If the search result includes a 'note' field, the filters were already relaxed to find the best
 available match — treat the returned listing as the working item.
@@ -39,7 +40,7 @@ response = client.chat.completions.create(
 ```
 
 - `messages` — starts with the system prompt and user query; assistant tool call responses and tool results are appended each iteration
-- `TOOL_DEFINITIONS` — JSON schemas for all available tools (search_listings, suggest_outfit, create_fit_card)
+- `TOOL_DEFINITIONS` — JSON schemas for all available tools (search_listings, compare_price, suggest_outfit, create_fit_card)
 - `tool_choice="auto"` — LLM decides whether to call a tool or respond directly
 
 ---
@@ -113,6 +114,11 @@ A non-empty string with outfit suggestions. If wardrobe is non-empty, suggestion
 <!-- What should the agent do if the wardrobe is empty or no outfit can be suggested? -->
 If `wardrobe["items"]` is empty, the LLM is prompted for general styling advice rather than wardrobe-specific combinations — the tool always returns a non-empty string and does not stop the loop. The LLM proceeds to call `create_fit_card` with whatever string is returned.
 
+**What if the tool gets invoked with empty selected item:**
+If `new_item` is empty, raises `ValueError("suggest_outfit called with empty new_item")`. This is a
+programmatic failure — the tool should never be called without a valid item. The agent guards
+against this by only calling `suggest_outfit` after `search_listings` returns at least one result.
+
 ---
 
 ### Tool 3: create_fit_card
@@ -151,9 +157,56 @@ If `outfit` is empty or whitespace, the tool returns a descriptive error string 
 
 ---
 
-### Additional Tools (if any)
+### Tool 4: compare_price
 
-<!-- Copy the block above for any tools beyond the required three -->
+**What it does:**
+Given a found listing, finds comparable items in the dataset — same category with at least one
+overlapping style tag — computes price statistics across those comparables, and calls the LLM to
+generate a 2–3 sentence price assessment explaining whether the item is a great deal, fair, or
+above average.
+
+**System prompt:**
+```
+You are a thrift shopping expert. Given a listing and price data from comparable items in the
+same category, write a 2–3 sentence price assessment. State whether the price is a great deal,
+fair, or above average, and explain why using the comparable prices. Be specific — reference the
+average price, the price range, and the number of comparable items. If there are very few
+comparables (1–2), acknowledge the limited sample. Plain text only — no bullet points, no headers,
+no markdown.
+```
+
+**Input parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `item` | dict | Yes | The selected listing dict from search_listings (the item whose price is being assessed) |
+
+**What it returns:**
+A 2–3 sentence string assessing the price relative to comparables — e.g. "This jacket is priced
+at $15, well below the $32.50 average for comparable vintage outerwear (range: $14–$58 across 6
+items). At 54% below average, it's a strong deal." If no comparables are found, returns a short
+string noting that no same-category items with matching style tags exist — does not call the LLM.
+
+**How comparables are found:**
+1. Load all listings.
+2. Filter to the same `category` as the item, excluding the item itself.
+3. Score each remaining listing by style_tag overlap with the item: count how many of the item's
+   `style_tags` appear in the comparable's `style_tags`.
+4. Drop all listings with a score of 0 (no shared tags → not stylistically comparable).
+5. Compute count, average price, min price, and max price across the remaining listings.
+6. Pass count, avg, min, and max to the LLM for reasoning. Count is included so the LLM can
+   qualify its confidence — "based on 1 comparable" reads differently than "based on 12 comparables".
+
+**What happens if it fails or returns nothing:**
+If no comparables remain after filtering (score > 0), return a fixed string such as
+`"No comparable {category} listings found to assess this price."` without calling the LLM.
+The planning loop continues — a missing price assessment does not stop the agent from
+proceeding to `suggest_outfit` and `create_fit_card`.
+
+**What if the tool gets invoked with empty selected item:**
+If `item` is empty, raises `ValueError("compare_price called with empty item")`. This is a
+programmatic failure — the tool should never be called without a valid item. The agent guards
+against this by only calling `compare_price` after `search_listings` returns at least one result.
 
 ---
 
@@ -191,6 +244,32 @@ The system prompt reinforces this: *"If the search result includes a 'note' fiel
 
 ---
 
+## Stretch Feature: Price Comparison Tool
+
+**What it does:**
+After a listing is found, the agent calls `compare_price` to assess whether the item's price is a good deal, fair, or above average relative to similar listings in the dataset. The result is shown in a dedicated panel in the UI.
+
+**How comparables are found (implemented in `compare_price` in `tools.py`):**
+1. Load all listings.
+2. Filter to the same `category` as the item, excluding the item itself.
+3. Score each by style_tag overlap — count how many of the item's `style_tags` appear in the comparable's `style_tags`. Drop zero-score listings (no shared tags → not stylistically comparable).
+4. Compute count, avg, min, and max price across all remaining comparables.
+5. Pass those four stats to the LLM, which generates a 2–3 sentence plain-text assessment. Count is included so the LLM can qualify its confidence ("based on 1 comparable" vs. "based on 12 comparables").
+
+**If no comparables exist:**
+Return `"No comparable {category} listings found to assess this price."` without calling the LLM. The loop continues — a missing price assessment does not stop the agent.
+
+**If `item` is empty:**
+Raises `ValueError("compare_price called with empty item")` — programmatic failure, not a user-facing case. The agent only calls `compare_price` after `search_listings` returns at least one result.
+
+**State changes:**
+- `session["price_assessment"]` — set to the LLM's assessment string by `dispatch_tool` (compare_price branch). Defaults to `""` so the UI panel renders empty if the tool is skipped.
+
+**What the user sees:**
+A dedicated price assessment panel (panel 2) in the Gradio UI showing the LLM's verdict and reasoning. The LLM is responsible for surfacing this — `app.py` renders `session["price_assessment"]` directly.
+
+---
+
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
@@ -199,7 +278,8 @@ The planning loop is LLM-driven. The first call is initialized with just the sys
 
 The LLM decides which tool to call next based on the message history:
 - No search result yet → calls `search_listings`
-- Listing found, no outfit yet → calls `suggest_outfit`
+- Listing found → may call `compare_price` and `suggest_outfit` in the same response, since both
+  only need `selected_item` and have no dependency on each other
 - Outfit found, no fit card yet → calls `create_fit_card`
 - Fit card done → returns a final response with no tool calls → loop exits
 
@@ -229,7 +309,8 @@ Each call to `run_agent()` creates a fresh session dict via `_new_session()`. Th
 | `search_results` | `search_listings` result | agent to select `selected_item` |
 | `selected_item` | agent (top of `search_results`) | `suggest_outfit`, `create_fit_card` |
 | `outfit_suggestion` | `suggest_outfit` result | `create_fit_card` |
-| `fit_card` | `create_fit_card` result | `app.py` (panel 3) |
+| `price_assessment` | `compare_price` result; defaults to `""` if tool is not called | `app.py` (panel 2) |
+| `fit_card` | `create_fit_card` result | `app.py` (panel 4) |
 | `error` | early exit or exception handler | `app.py` (panel 1) |
 | `retry_note` | `dispatch_tool` (search branch) | `app.py` (prepended to panel 1 when filters were relaxed) |
 
@@ -243,7 +324,8 @@ For each tool, describe the specific failure mode you're handling and what the a
 
 | Tool | Failure mode | Agent response |
 |------|-------------|----------------|
-| search_listings | No results match the query | Set `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords." Stop the loop immediately. Do not call `suggest_outfit` or `create_fit_card`. Return the session. |
+| search_listings | No results match the query | Set `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords." Stop the loop immediately. Do not call any further tools. Return the session. |
+| compare_price | No same-category items with overlapping style tags | Return a fixed string `"No comparable {category} listings found to assess this price."` without calling the LLM. Store in `session["price_assessment"]`. Loop continues — a missing price assessment does not stop the agent. |
 | suggest_outfit | Wardrobe is empty | Do not stop the loop. Check `wardrobe["items"]` — if empty, switch to the empty-wardrobe system prompt for general styling advice. Call the LLM and return the response string as normal. The loop continues to `create_fit_card`. |
 | create_fit_card | Outfit input is missing or incomplete | The tool returns a descriptive error string without calling the LLM. `run_agent()` checks the `outfit` input after the call: if empty or whitespace, the return value is routed to `session["error"]`; otherwise to `session["fit_card"]`. Loop stops and session is returned with `fit_card` as None. |
 
@@ -292,6 +374,14 @@ LLM Call (messages + TOOL_DEFINITIONS, tool_choice="auto") ◄──────
     │       │ tool result appended to messages                       │                                                     │
     │       └───────────────────────────────────────────────────────►┤                                                     │
     │                                                                │                                                     │
+    ├─► compare_price(selected_item)                                 │                                                     │
+    │       │ filter for similar category & style listings and send  │                                                     │
+    │       │ count, average, min, max price to LLM for assessment   │                                                     │
+    |       | return no comparison if no comparables exist           |                                                     |
+    │       ▼                                                        │                                                     │
+    │   session["price_assessment"]="..."                            │                                                     │
+    │       │ tool result appended to messages                       │                                                     │
+    │       └───────────────────────────────────────────────────────►┤                                                     │    │                                                                │                                                     │
     ├─► suggest_outfit(selected_item, wardrobe)                      │                                                     │
     │       │ wardrobe["items"]=[] → LLM: general styling advice     │                                                     │
     │       │ wardrobe["items"]!=[] → LLM: wardrobe-based suggestion │                                                     │
@@ -366,11 +456,13 @@ session["selected_item"] is set to results[0] — e.g. {title: "Vintage Graphic 
 
 **Step 2:**
 <!-- What happens next? What was returned from step 1? What tool is called now? -->
-The LLM receives a new list of listings matching description and max_price it searched.  
-a.) If the returned result contains one or more listings, the LLM selects the most relevant and 
-queues up one tool call for suggest_outfit(selected_item, wardrobe).  
-b.) If an empty result is returned, the LLM stops calling tools, informs the user of unavailability 
-of the clothes the user is looking for, suggesting the user change their requirements. 
+The LLM receives the search result.
+a.) If the result is non-empty, it recognizes that price assessment and outfit suggestion are both
+still missing, and may call `compare_price` and `suggest_outfit` in the same response
+(parallel tool calls) since both only need `selected_item`.
+`compare_price` result is stored in `session["price_assessment"]`.
+`suggest_outfit` result is stored in `session["outfit_suggestion"]`.
+b.) If the result is empty, the LLM stops calling tools and informs the user there is nothing to style.
 
 **Step 3:**
 <!-- Continue until the full interaction is complete -->

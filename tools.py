@@ -79,6 +79,14 @@ SUGGEST_OUTFIT_PROMPT_GENERAL = (
     "Be concise — 3–5 sentences. Plain text only — no bullet points, no headers, no markdown."
 )
 
+COMPARE_PRICE_PROMPT = (
+    "You are a thrift shopping expert. Given a listing and price data from comparable items "
+    "in the same category, write a 2–3 sentence price assessment. State whether the price is "
+    "a great deal, fair, or above average, and explain why using the comparable prices. "
+    "Be specific — reference the average price or price range. "
+    "Plain text only — no bullet points, no headers, no markdown."
+)
+
 CREATE_FIT_CARD_PROMPT = (
     "You are a fashion-forward social media writer. Given the outfit suggestion and thrift item below, "
     "pick the single most interesting outfit combination and write a 2–4 sentence Instagram caption for it. "
@@ -257,5 +265,64 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
         {"role": "system", "content": CREATE_FIT_CARD_PROMPT},
         {"role": "user", "content": user_message},
     ], temperature=1.0)
+
+    return response.choices[0].message.content
+
+
+# ── Tool 4: compare_price ────────────────────────────────────────────────────
+
+def compare_price(item: dict) -> str:
+    """
+    Compare the price of a thrift listing against similar items in the dataset.
+
+    Args:
+        item: The selected listing dict from search_listings.
+
+    Returns:
+        A 2–3 sentence price assessment string. Returns a no-comparables message
+        if no same-category items share any style tags with the item.
+    """
+    # Raises rather than returns an error string — empty item is a
+    # programmatic failure; this function is not meant to be called without a valid item.
+    if not item:
+        raise ValueError("compare_price called with empty item")
+
+    listings = load_listings()
+
+    same_category = [
+        listing for listing in listings
+        if listing["id"] != item["id"] and listing["category"] == item["category"]
+    ]
+
+    item_tags = set(item["style_tags"])
+    comparables = [
+        listing for listing in same_category
+        if len(set(listing["style_tags"]) & item_tags) > 0
+    ]
+
+    if not comparables:
+        return f"No comparable {item['category']} listings found to assess this price."
+
+    prices = [listing["price"] for listing in comparables]
+    count = len(prices)
+    avg = sum(prices) / count
+    low = min(prices)
+    high = max(prices)
+
+    item_text = (
+        f"Item: {item['title']}\n"
+        f"Category: {item['category']}\n"
+        f"Price: ${item['price']:.2f}\n"
+    )
+    stats_text = (
+        f"Comparable {item['category']} items: {count}\n"
+        f"Average price: ${avg:.2f}\n"
+        f"Range: ${low:.2f} – ${high:.2f}\n"
+    )
+
+    response = _chat([
+        {"role": "system", "content": COMPARE_PRICE_PROMPT},
+        {"role": "user", "content": f"{item_text}\n{stats_text}"},
+    ])
 
     return response.choices[0].message.content

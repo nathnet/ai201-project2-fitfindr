@@ -20,7 +20,7 @@ from utils.data_loader import get_example_wardrobe, get_empty_wardrobe
 
 # ── query handler ─────────────────────────────────────────────────────────────
 
-def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
+def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str, str]:
     """
     Called by Gradio when the user submits a query.
 
@@ -29,9 +29,9 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
         wardrobe_choice: Either "Example wardrobe" or "Empty wardrobe (new user)".
 
     Returns:
-        A tuple of three strings:
-            (listing_text, outfit_suggestion, fit_card)
-        Each string maps to one of the three output panels in the UI.
+        A tuple of four strings:
+            (listing_text, price_assessment, outfit_suggestion, fit_card)
+        Each string maps to one of the four output panels in the UI.
 
     Done:
         1. Guard against an empty query (return early with an error message).
@@ -55,7 +55,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     session = run_agent(user_query, wardrobe)
 
     if session["error"]:
-        return session["error"], "", ""
+        return session["error"], "", "", ""
 
     item = session["selected_item"]
     listing_text = (
@@ -73,7 +73,7 @@ def handle_query(user_query: str, wardrobe_choice: str) -> tuple[str, str, str]:
     if session["retry_note"]:
         listing_text = session["retry_note"] + "\n" + listing_text
 
-    return listing_text, session["outfit_suggestion"], session["fit_card"]
+    return listing_text, session["price_assessment"], session["outfit_suggestion"], session["fit_card"]
 
 
 # ── interface ─────────────────────────────────────────────────────────────────
@@ -116,6 +116,11 @@ Describe what you're looking for — include size and price if you want to filte
                 lines=8,
                 interactive=False,
             )
+            price_output = gr.Textbox(
+                label="💰 Price assessment",
+                lines=8,
+                interactive=False,
+            )
             outfit_output = gr.Textbox(
                 label="👗 Outfit idea",
                 lines=8,
@@ -136,12 +141,12 @@ Describe what you're looking for — include size and price if you want to filte
         submit_btn.click(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, price_output, outfit_output, fitcard_output],
         )
         query_input.submit(
             fn=handle_query,
             inputs=[query_input, wardrobe_choice],
-            outputs=[listing_output, outfit_output, fitcard_output],
+            outputs=[listing_output, price_output, outfit_output, fitcard_output],
         )
 
     return demo

@@ -1,6 +1,6 @@
 # FitFindr
 
-A multi-tool thrift shopping AI agent. Give it a natural language query and it finds matching secondhand listings, suggests outfits using your wardrobe, and generates a shareable Instagram caption — all in one interaction.
+A multi-tool thrift shopping AI agent. Give it a natural language query and it finds matching secondhand listings, assesses the price against comparable items, suggests outfits using your wardrobe, and generates a shareable Instagram caption — all in one interaction.
 
 Built with Groq, orchestrated by an LLM-driven planning loop, and served through a Gradio UI.
 
@@ -46,20 +46,21 @@ response = client.chat.completions.create(
 ```
 
 - `messages` — starts with the system prompt and user query; assistant tool call messages and tool results are appended each iteration so the LLM has the full history
-- `TOOL_DEFINITIONS` — JSON schemas for all three tools (`search_listings`, `suggest_outfit`, `create_fit_card`) describing their parameters and when to use them
+- `TOOL_DEFINITIONS` — JSON schemas for all four tools (`search_listings`, `compare_price`, `suggest_outfit`, `create_fit_card`) describing their parameters and when to use them
 - `tool_choice="auto"` — the LLM decides whether to call a tool or return a final text response
 
 The system prompt defines the exit condition rather than a fixed sequence:
 
 ```
-You are FitFindr, a thrift shopping assistant. You are done when you have all three of the
+You are FitFindr, a thrift shopping assistant. You are done when you have all four of the
 following ready for the user:
 
 1. A thrift listing that matches the user's request.
-2. An outfit suggestion built around that listing.
-3. An Instagram-style fit card caption for the outfit.
+2. A price assessment showing how the listing's price compares to similar items.
+3. An outfit suggestion built around that listing.
+4. An Instagram-style fit card caption for the outfit.
 
-Finding the listing is only the first step — all three must be ready before the task is done.
+Finding the listing is only the first step — all four must be ready before the task is done.
 If search returns no results, the task is complete — inform the user there is nothing to style.
 If the search result includes a 'note' field, the filters were already relaxed to find the best
 available match — treat the returned listing as the working item.
@@ -107,13 +108,6 @@ Each dict contains:
 
 **Purpose:** Given a thrifted item and the user's wardrobe, calls the LLM to suggest 1–2 complete outfit combinations. If the wardrobe is empty, returns general styling advice instead.
 
-**Input parameters:**
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `new_item` | `dict` | Yes | A listing dict from `search_listings` — the item the user is considering |
-| `wardrobe` | `dict` | Yes | A wardrobe dict with an `"items"` key containing a list of wardrobe item dicts. May be empty. |
-
 **System prompt (non-empty wardrobe):**
 ```
 You are a personal stylist. Given the thrift item and the user's wardrobe below, suggest 1–2
@@ -131,6 +125,13 @@ and how to build an outfit around it.
 Be concise — 3–5 sentences. Plain text only — no bullet points, no headers, no markdown.
 ```
 
+**Input parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `new_item` | `dict` | Yes | A listing dict from `search_listings` — the item the user is considering |
+| `wardrobe` | `dict` | Yes | A wardrobe dict with an `"items"` key containing a list of wardrobe item dicts. May be empty. |
+
 **Returns:** `str` — a non-empty outfit suggestion. If `wardrobe["items"]` is non-empty, suggestions reference specific named pieces from the wardrobe and flag any missing key categories (tops, bottoms, shoes). If the wardrobe is empty, returns general styling advice for the item type and vibe.
 
 **What happens if it returns nothing:** An empty wardrobe is not a failure — the tool switches to a general styling prompt and always returns a non-empty string. The loop continues to `create_fit_card`.
@@ -143,13 +144,6 @@ Be concise — 3–5 sentences. Plain text only — no bullet points, no headers
 
 **Purpose:** Given an outfit suggestion and the thrifted item, calls the LLM to generate a 2–4 sentence Instagram-style OOTD caption that mentions the item name, price, and platform naturally.
 
-**Input parameters:**
-
-| Parameter | Type | Required | Description |
-|---|---|---|---|
-| `outfit` | `str` | Yes | The outfit suggestion string returned by `suggest_outfit` |
-| `new_item` | `dict` | Yes | The selected listing dict (for item name, price, and platform in the caption) |
-
 **System prompt:**
 ```
 You are a fashion-forward social media writer. Given the outfit suggestion and thrift item below,
@@ -160,11 +154,50 @@ Capture the outfit vibe in specific terms. Sound different each time.
 Output the caption text only — no headers, no labels, no preamble.
 ```
 
+**Input parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `outfit` | `str` | Yes | The outfit suggestion string returned by `suggest_outfit` |
+| `new_item` | `dict` | Yes | The selected listing dict (for item name, price, and platform in the caption) |
+
 **Returns:** `str` — a casual 2–4 sentence Instagram caption. Does not raise an exception.
 
 **What happens if it returns nothing:** If `outfit` is empty or whitespace, the tool returns `"Something went wrong generating your fit card. Please try your search again."` without calling the LLM. `dispatch_tool` checks the `outfit` input and routes that string to `session["error"]`, and the loop exits with `fit_card` as `None`.
 
 **Course limitation:** The required function signature is `-> str`, which means both success and failure must return a string. The idiomatic Python approach would be to return `None` on failure and let the caller check. Instead, `dispatch_tool` checks the *input* (`outfit`) rather than the output to distinguish an error from a valid caption, and routes accordingly.
+
+### Tool 4: `compare_price`
+
+**Purpose:** Given a selected listing, finds comparable items in the dataset — same category with at least one overlapping style tag — and calls the LLM to generate a 2–3 sentence price assessment based on price statistics across those comparables.
+
+**System prompt:**
+```
+You are a thrift shopping expert. Given a listing and price data from comparable items in the
+same category, write a 2–3 sentence price assessment. State whether the price is a great deal,
+fair, or above average, and explain why using the comparable prices. Be specific — reference the
+average price, the price range, and the number of comparable items. If there are very few
+comparables (1–2), acknowledge the limited sample. Plain text only — no bullet points, no headers,
+no markdown.
+```
+
+**Input parameters:**
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `item` | `dict` | Yes | The selected listing dict from `search_listings` |
+
+**How comparables are found:**
+1. Filter all listings to the same `category` as the item, excluding the item itself.
+2. Score each by style_tag overlap — count how many of the item's `style_tags` appear in the comparable's `style_tags`.
+3. Drop listings with a score of 0 (no shared tags → not stylistically comparable).
+4. Compute count, average price, min price, and max price across all remaining comparables.
+
+**Returns:** `str` — a 2–3 sentence price assessment. If no comparables are found, returns `"No comparable {category} listings found to assess this price."` without calling the LLM.
+
+**What happens if no comparables exist:** Returns a fixed no-comparables string without calling the LLM. Stored in `session["price_assessment"]` (defaults to `""`). The loop continues — a missing price assessment does not stop the agent.
+
+**What happens if `item` is empty:** Raises `ValueError("compare_price called with empty item")`. This is intentional — calling `compare_price` without a valid item is a programmatic error, not a user-facing case. The agent guards against this by only calling `compare_price` after `search_listings` returns at least one result.
 
 ---
 
@@ -177,11 +210,11 @@ The loop is LLM-driven — not a fixed sequential pipeline. On each iteration, t
 | LLM observes in message history | Decision |
 |---|---|
 | No search has been run yet | Call `search_listings` with parsed parameters |
-| Listing found, no outfit suggestion yet | Call `suggest_outfit` |
+| Listing found, no price assessment or outfit yet | May call `compare_price` and `suggest_outfit` in the same response — both only need `selected_item` |
 | Outfit found, no fit card yet | Call `create_fit_card` |
-| All three outputs ready | Return a final response — no tool calls, loop exits |
+| All four outputs ready | Return a final response — no tool calls, loop exits |
 
-The system prompt defines the exit condition rather than the sequence: the LLM is told it is done only when all three outputs (listing, outfit, fit card) are ready. This lets the model reason about what is still missing on each iteration rather than following fixed steps.
+The system prompt defines the exit condition rather than the sequence: the LLM is told it is done only when all four outputs (listing, price assessment, outfit, fit card) are ready. This lets the model reason about what is still missing on each iteration rather than following fixed steps.
 
 **Early exits (Python-side, not LLM-driven):**
 
@@ -208,8 +241,9 @@ Each `run_agent()` call creates a fresh session dict via `_new_session()`. The s
 | `search_results` | `dispatch_tool` (search branch) | Agent to select `selected_item` |
 | `selected_item` | `dispatch_tool` (search branch) | `suggest_outfit`, `create_fit_card` via `dispatch_tool` |
 | `outfit_suggestion` | `dispatch_tool` (suggest branch) | `create_fit_card` via `dispatch_tool` |
-| `fit_card` | `dispatch_tool` (fit card branch) | `app.py` — rendered in panel 3 |
-| `error` | `dispatch_tool` or exception handler | `app.py` — rendered in panel 1, panels 2 and 3 left empty |
+| `price_assessment` | `dispatch_tool` (compare_price branch); defaults to `""` | `app.py` — rendered in panel 2 |
+| `fit_card` | `dispatch_tool` (fit card branch) | `app.py` — rendered in panel 4 |
+| `error` | `dispatch_tool` or exception handler | `app.py` — rendered in panel 1, panels 2, 3, and 4 left empty |
 | `retry_note` | `dispatch_tool` (search branch) | `app.py` — prepended to panel 1 when filters were relaxed |
 
 **Key design:** `dispatch_tool()` reads from and writes to the session directly — tool functions receive only what they need as function arguments, while state like `session["selected_item"]` and `session["wardrobe"]` is carried invisibly between steps. The user never re-enters data between tools.
@@ -222,7 +256,8 @@ Tool results are also appended to `messages` each iteration so the LLM can read 
 
 | Tool | Failure mode | Agent response |
 |---|---|---|
-| `search_listings` | Returns empty list after all retries (description only, no filters left) | `dispatch_tool` sets `session["error"]` to `"No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords."` Loop exits immediately. `suggest_outfit` and `create_fit_card` are never called. |
+| `search_listings` | Returns empty list after all retries (description only, no filters left) | `dispatch_tool` sets `session["error"]` to `"No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords."` Loop exits immediately. No further tools are called. |
+| `compare_price` | No same-category listings share any style tags with the item | Returns `"No comparable {category} listings found to assess this price."` without calling the LLM. Stored in `session["price_assessment"]`. Loop continues — a missing price assessment does not stop the agent. |
 | `suggest_outfit` | `wardrobe["items"]` is empty | Not treated as a failure — the tool switches to a general styling prompt and returns advice as normal. The loop continues to `create_fit_card`. |
 | `create_fit_card` | `outfit` argument is empty or whitespace | The tool returns a descriptive error string without calling the LLM. `dispatch_tool` checks the `outfit` input: if empty/whitespace, routes the return value to `session["error"]`; otherwise to `session["fit_card"]`. |
 | LLM — any iteration | `400 BadRequestError` with `code == "tool_use_failed"` (malformed tool call syntax) | `_chat()` retries the call up to `MAX_FAILED_RETRIES = 2` times (message history unchanged since error fires before append). On exhaustion, re-raises `BadRequestError`. `run_agent` catches it, logs the error, and sets `session["error"]` to `"FitFindr ran into an issue and couldn't complete your request. Please try again."` |
@@ -260,13 +295,22 @@ LLM Call (messages + TOOL_DEFINITIONS, tool_choice="auto") ◄──────
     │       │ tool result appended to messages                       │                                                     │
     │       └───────────────────────────────────────────────────────►┤                                                     │
     │                                                                │                                                     │
+    ├─► compare_price(selected_item)                                 │                                                     │
+    │       │ filter for similar category & style listings and send  │                                                     │
+    │       │ count, average, min, max price to LLM for assessment   │                                                     │
+    |       | return no comparison if no comparables exist           |                                                     |
+    │       ▼                                                        │                                                     │
+    │   session["price_assessment"]="..."                            │                                                     │
+    │       │ tool result appended to messages                       │                                                     │
+    │       └───────────────────────────────────────────────────────►┤                                                     │
+    │                                                                │                                                     │
     ├─► suggest_outfit(selected_item, wardrobe)                      │                                                     │
     │       │ wardrobe["items"]=[] → LLM: general styling advice     │                                                     │
     │       │ wardrobe["items"]!=[] → LLM: wardrobe-based suggestion │                                                     │
     │       ▼                                                        │                                                     │
     │   session["outfit_suggestion"]="..."                           │                                                     │
     │       │ tool result appended to messages                       │                                                     │
-    │       └───────────────────────────────────────────────────────►┤                                                     │
+    │       └───────────────────────────────────────────────────────►┤                                                     │ 
     │                                                                │                                                     │
     ├─► create_fit_card(outfit_suggestion, selected_item)            │                                                     │
     │       │                                                        │                                                     │
@@ -309,6 +353,45 @@ return json.dumps(payload)
 The `note` key is present only when filters were relaxed. The system prompt instructs the LLM: *"If the search result includes a 'note' field, the filters were already relaxed to find the best available match — treat the returned listing as the working item."* This prevents the LLM from re-calling `search_listings` with adjusted parameters.
 
 **What the user sees:** `handle_query()` checks `session["retry_note"]` and prepends it to the listing panel so the user knows which filters were dropped. The LLM is not responsible for surfacing this — the UI layer handles it directly.
+
+**Sample result** (query: `"vintage graphic tee size XXS under $5"`):
+```
+No results found for size XXS — size filter removed.
+No results found under $5.00 — price filter removed.
+
+Graphic Tee — 2003 Tour Bootleg Style
+
+Platform: depop
+Price: $24.00
+Size: L
+Condition: good
+Brand: Unknown
+Colors: black
+Style: graphic tee, vintage, grunge, streetwear, band tee
+
+Vintage-style bootleg tee with faded graphic. Slightly boxy fit. 100% cotton, soft and worn-in.
+```
+
+---
+
+## Stretch Feature: Price Comparison Tool
+
+`compare_price` compares a found listing's price against similar items in the dataset and returns a 2–3 sentence LLM-generated assessment. It is called by the agent as part of the standard planning loop — the system prompt lists a price assessment as one of the four required outputs before the task is considered done.
+
+**How comparisons are made:**
+1. Filter all listings to the same category as the found item, excluding the item itself.
+2. Score remaining listings by style_tag overlap — count how many of the item's `style_tags` appear in each comparable's `style_tags`. Drop zero-score listings (no shared tags → not stylistically comparable).
+3. Compute count, average price, min price, and max price across all remaining comparables.
+4. Pass those stats to the LLM, which generates a plain-text assessment referencing the average, range, and count. If count is very low (1–2), the LLM is instructed to acknowledge the limited sample.
+
+If no comparables are found after filtering, a fixed no-comparables string is returned without calling the LLM. `session["price_assessment"]` defaults to `""` so the UI panel renders empty rather than erroring if the tool is not called.
+
+**Sample result:**
+```
+At $24.00, this graphic tee is priced above the comparable average of $20.42 but still falls
+within the typical range of $15.00 to $28.00 for similar tops. While it isn't a great deal,
+the price is fair given its placement near the higher end of the market spectrum.
+```
 
 ---
 
@@ -357,3 +440,7 @@ Directed Claude Code to implement the retry fallback in `dispatch_tool`'s search
 **Instance 7 — `_chat()` abstraction for malformed tool call retry:**
 
 Directed Claude Code to extract the `BadRequestError` retry logic from inline in `run_agent` into a reusable `_chat()` helper in `tools.py`. The function encapsulates `_get_groq_client()`, the bounded retry loop (`for` loop capped at `MAX_FAILED_RETRIES = 2` to prevent infinite loops), and re-raises on exhaustion. Overrode the initial `while True` loop with a `for` loop after identifying that an unchecked loop is a maintenance hazard. `run_agent` now catches `BadRequestError` at the outer level and logs the error before setting `session["error"]`, keeping retry mechanics out of the planning loop.
+
+**Instance 8 — Price comparison tool (stretch feature):**
+
+Directed Claude Code to implement `compare_price()` from the Tool 4 spec in `planning.md`. Reviewed and overrode several design decisions: (1) rejected passing example comparable titles and prices to the LLM — count, avg, min, and max are sufficient for a price verdict and title names add tokens without improving reasoning; (2) revised the comparables algorithm from "sort by overlap and take top N" to "drop zero-score listings and use all remaining" — more consistent with how `search_listings` works and avoids an arbitrary cap; (3) confirmed variable names use `listing` throughout rather than the abbreviation `l`. Updated the system prompt to instruct the LLM to acknowledge a limited sample when comparables are 1–2, so the assessment reflects the confidence level of the underlying data.
