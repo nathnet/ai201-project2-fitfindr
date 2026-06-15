@@ -13,19 +13,20 @@ The planning loop is driven by the LLM. On each iteration, the agent calls Groq 
 
 **System prompt:**
 ```
-You are FitFindr, a thrift shopping assistant. Use the available tools to help the user find a
-secondhand item and build an outfit around it.
+You are FitFindr, a thrift shopping assistant. You are done when you have all three of the
+following ready for the user:
 
-You are done only when you have all three of the following ready for the user:
-- A matching thrift listing
-- An outfit suggestion for that item
-- An Instagram-style fit card caption
+1. A thrift listing that matches the user's request.
+2. An outfit suggestion built around that listing.
+3. An Instagram-style fit card caption for the outfit.
 
-Do not give a final response until all three are ready.
-If search returns no results, stop and inform the user — there is nothing to style.
+Finding the listing is only the first step — all three must be ready before the task is done.
+If search returns no results, the task is complete — inform the user there is nothing to style.
+If the search result includes a 'note' field, the filters were already relaxed to find the best
+available match — treat the returned listing as the working item.
 ```
 
-> **Note:** The prompt was revised from a prescriptive step-by-step sequence to a goal-oriented exit condition. This gives the LLM room to reason about what is still missing each iteration rather than following fixed steps — more aligned with the course's intent of LLM-driven planning.
+> **Note:** The prompt is goal-oriented rather than prescriptive — it defines what "done" looks like instead of dictating which tools to call and in what order. This gives the LLM room to reason about what is still missing each iteration. The "first step" line is critical: without it, the LLM tends to treat finding a listing as sufficient and exits early. The `note` field instruction tells the LLM that filter relaxation was already handled by the Python layer, preventing it from re-calling search with adjusted parameters.
 
 **Groq call structure:**
 ```python
@@ -156,6 +157,40 @@ If `outfit` is empty or whitespace, the tool returns a descriptive error string 
 
 ---
 
+## Stretch Feature: Retry Logic with Fallback
+
+**What it does:**
+If `search_listings` returns no results, the agent automatically retries with progressively looser constraints rather than immediately surfacing an error. The user is told what was adjusted so they understand why the result may differ from their original query.
+
+**Retry order (implemented in `dispatch_tool`, search branch):**
+1. Run the original search with all filters (description + size + max_price).
+2. If empty and `size` was specified → append `"No results found for size {size} — size filter removed.\n"` to `session["retry_note"]`, then retry with size removed.
+3. If still empty and `max_price` was specified → append `"No results found under ${max_price} — price filter removed.\n"` to `session["retry_note"]`, then retry with price removed as well.
+4. If still empty after all retries → set `session["error"]` with a helpful message. Stop the loop.
+
+**Tool result format:**
+`dispatch_tool` returns a structured JSON payload instead of a raw list:
+```python
+payload = {"results": results[:1]}
+if session["retry_note"]:
+    payload["note"] = session["retry_note"].strip()
+return json.dumps(payload)
+```
+The `note` key is included only when filters were relaxed. This lets the LLM understand why the returned item may not match the original filters (e.g. different size or price), preventing it from re-calling `search_listings` with adjusted parameters.
+
+The system prompt reinforces this: *"If the search result includes a 'note' field, the filters were already relaxed to find the best available match — treat the returned listing as the working item."*
+
+**State changes:**
+- `session["retry_note"]` — reset to `""` at the start of each search dispatch, then appended to when a filter is dropped (before the retry call, not after). This means the note records what was attempted, regardless of whether the retry succeeded.
+- `session["parsed"]` — stores the original LLM-supplied values; the relaxed values used in retries are not written back.
+
+**What the user sees:**
+`handle_query()` checks `session["retry_note"]` and prepends it to the listing panel text so the user can clearly see what filter was dropped. The LLM is not responsible for surfacing this — the UI layer handles it directly.
+
+**No new tool or TOOL_DEFINITIONS entry needed** — this is purely a change to `dispatch_tool`'s search branch.
+
+---
+
 ## Planning Loop
 
 **How does your agent decide which tool to call next?**
@@ -173,7 +208,10 @@ The LLM decides which tool to call next based on the message history:
 - `create_fit_card` receives an empty outfit string → set `session["error"]`, call no further tools, return session immediately
 
 **Loop termination:**
-The loop exits when the LLM returns a response with no `tool_calls`. A max iteration guard of **5** is set (3 required tools + 2 buffer, increasing as new tools are introduced). If the guard is hit, `session["error"]` is set to a generic failure message and the session is returned.
+The loop exits when the LLM returns a response with no `tool_calls`. If `fit_card` is still `None` at that point (the LLM gave up without completing all three steps), `session["error"]` is set to `"FitFindr couldn't complete your request. Please try again."` so the UI surfaces an error rather than rendering partial results. A max iteration guard of **5** is set (3 required tools + 2 buffer for search retries). If the guard is hit, `session["error"]` is set to `"FitFindr ran into an issue and couldn't complete your request. Please try again."` and the session is returned.
+
+**Malformed tool call handling:**
+If Groq returns a `400 BadRequestError` with `code == "tool_use_failed"`, the LLM generated a malformed tool call. Retry logic is encapsulated in `_chat()` in `tools.py` — it retries the same call up to `MAX_FAILED_RETRIES = 2` times using a bounded `for` loop. Because the error fires before `messages.append(message)`, the message history is unchanged on each retry. If retries are exhausted, `_chat()` re-raises the `BadRequestError`. `run_agent` catches it at the outer level, logs the error, and sets `session["error"]` to `"FitFindr ran into an issue and couldn't complete your request. Please try again."`
 
 ---
 
@@ -193,6 +231,7 @@ Each call to `run_agent()` creates a fresh session dict via `_new_session()`. Th
 | `outfit_suggestion` | `suggest_outfit` result | `create_fit_card` |
 | `fit_card` | `create_fit_card` result | `app.py` (panel 3) |
 | `error` | early exit or exception handler | `app.py` (panel 1) |
+| `retry_note` | `dispatch_tool` (search branch) | `app.py` (prepended to panel 1 when filters were relaxed) |
 
 Tool results are also appended to the `messages` list each iteration so the LLM can read them in the next loop. The session dict is the Python-side record used to populate the Gradio UI on return; the message history is the LLM-side record used to drive tool selection.
 
@@ -207,6 +246,12 @@ For each tool, describe the specific failure mode you're handling and what the a
 | search_listings | No results match the query | Set `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords." Stop the loop immediately. Do not call `suggest_outfit` or `create_fit_card`. Return the session. |
 | suggest_outfit | Wardrobe is empty | Do not stop the loop. Check `wardrobe["items"]` — if empty, switch to the empty-wardrobe system prompt for general styling advice. Call the LLM and return the response string as normal. The loop continues to `create_fit_card`. |
 | create_fit_card | Outfit input is missing or incomplete | The tool returns a descriptive error string without calling the LLM. `run_agent()` checks the `outfit` input after the call: if empty or whitespace, the return value is routed to `session["error"]`; otherwise to `session["fit_card"]`. Loop stops and session is returned with `fit_card` as None. |
+
+**Malformed tool call (`tool_use_failed`):**
+If Groq returns a `400 BadRequestError` with `code == "tool_use_failed"`, the LLM generated invalid function call syntax. Retry logic is encapsulated in `_chat()` in `tools.py` — it retries the same call up to `MAX_FAILED_RETRIES = 2` times using a bounded `for` loop. The error fires before any message is appended, so the message history is unchanged on each retry. If retries are exhausted, `_chat()` re-raises the `BadRequestError`. `run_agent` catches it at the outer level, logs the error, and sets `session["error"]` to `"FitFindr ran into an issue and couldn't complete your request. Please try again."`
+
+**Incomplete session on early LLM exit:**
+If the LLM returns no tool calls but `fit_card` is still `None` (the LLM gave up mid-pipeline), `session["error"]` is set to `"FitFindr couldn't complete your request. Please try again."`. This prevents `handle_query()` from attempting to render a partial session with `selected_item` or `outfit_suggestion` set but no `fit_card`.
 
 **General exception handling:**
 The entire `run_agent()` body is wrapped in a `try/except Exception` — any unhandled exception (e.g. file I/O error from `load_listings()`, Groq API failure) is caught and surfaced through `session["error"]` rather than crashing the app.

@@ -20,10 +20,11 @@ Usage (once implemented):
 
 import json
 
+from groq import BadRequestError
 from groq.types.chat import ChatCompletionMessageToolCall
 
 from config import GROQ_MODEL
-from tools import _get_groq_client, create_fit_card, search_listings, suggest_outfit
+from tools import _chat, create_fit_card, search_listings, suggest_outfit
 
 
 # ── tool definitions ──────────────────────────────────────────────────────────
@@ -139,6 +140,7 @@ def _new_session(query: str, wardrobe: dict) -> dict:
         "outfit_suggestion": None,   # string returned by suggest_outfit
         "fit_card": None,            # string returned by create_fit_card
         "error": None,               # set if the interaction ended early
+        "retry_note": "",             # appended to if search was retried with loosened filters
     }
 
 
@@ -157,16 +159,39 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
         args = {}
 
     if name == "search_listings":
+        session["retry_note"] = ""  # reset on each search dispatch
         session["parsed"] = {
             "description": args.get("description"),
             "size": args.get("size"),
             "max_price": args.get("max_price"),
         }
+
         results = search_listings(
             description=session["parsed"]["description"],
             size=session["parsed"]["size"],
             max_price=session["parsed"]["max_price"],
         )
+
+        if not results and session["parsed"]["size"] is not None:
+            session["retry_note"] += (
+                f"No results found for size {session['parsed']['size']} — size filter removed.\n"
+            )
+            results = search_listings(
+                description=session["parsed"]["description"],
+                size=None,
+                max_price=session["parsed"]["max_price"],
+            )
+
+        if not results and session["parsed"]["max_price"] is not None:
+            session["retry_note"] += (
+                f"No results found under ${session['parsed']['max_price']:.2f} — price filter removed.\n"
+            )
+            results = search_listings(
+                description=session["parsed"]["description"],
+                size=None,
+                max_price=None,
+            )
+
         session["search_results"] = results
         session["selected_item"] = results[0] if results else None
         if not results:
@@ -175,7 +200,11 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
                 "remove the size or price filter, or use different keywords."
             )
         # Return only the top result to keep token usage low — full results are in session.
-        return json.dumps(results[:1])
+        # Structured payload so the LLM understands any filter relaxation without being re-prompted.
+        payload = {"results": results[:1]}
+        if session["retry_note"]:
+            payload["note"] = session["retry_note"].strip()
+        return json.dumps(payload)
 
     if name == "suggest_outfit":
         outfit = suggest_outfit(session["selected_item"], session["wardrobe"])
@@ -200,14 +229,15 @@ def dispatch_tool(tool_call: ChatCompletionMessageToolCall, session: dict) -> st
 MAX_ITERATIONS = 5
 
 SYSTEM_PROMPT = (
-    "You are FitFindr, a thrift shopping assistant. Use the available tools to help the user find a "
-    "secondhand item and build an outfit around it.\n\n"
-    "You are done only when you have all three of the following ready for the user:\n"
-    "- A matching thrift listing\n"
-    "- An outfit suggestion for that item\n"
-    "- An Instagram-style fit card caption\n\n"
-    "Do not give a final response until all three are ready. "
-    "If search returns no results, stop and inform the user — there is nothing to style."
+    "You are FitFindr, a thrift shopping assistant. "
+    "You are done when you have all three of the following ready for the user:\n\n"
+    "1. A thrift listing that matches the user's request.\n"
+    "2. An outfit suggestion built around that listing.\n"
+    "3. An Instagram-style fit card caption for the outfit.\n\n"
+    "Finding the listing is only the first step — all three must be ready before the task is done. "
+    "If search returns no results, the task is complete — inform the user there is nothing to style. "
+    "If the search result includes a 'note' field, the filters were already relaxed to find "
+    "the best available match — treat the returned listing as the working item."
 )
 
 
@@ -261,27 +291,23 @@ def run_agent(query: str, wardrobe: dict) -> dict:
     session = _new_session(query, wardrobe)
 
     try:
-        client = _get_groq_client()
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": query},
         ]
 
         for iteration in range(MAX_ITERATIONS):
-            print(f"[FitFindr] Iteration {iteration + 1}/{MAX_ITERATIONS}")
+            print(f"\n[FitFindr] Iteration {iteration + 1}/{MAX_ITERATIONS}")
             if session["error"]:
                 return session
 
-            response = client.chat.completions.create(
-                model=GROQ_MODEL,
-                messages=messages,
-                tools=TOOL_DEFINITIONS,
-                tool_choice="auto",
-            )
+            response = _chat(messages, tools=TOOL_DEFINITIONS, tool_choice="auto")
 
             message = response.choices[0].message
 
             if not message.tool_calls:
+                if session["fit_card"] is None:
+                    session["error"] = "FitFindr couldn't complete your request. Please try again."
                 print("[FitFindr] No tool calls — loop complete")
                 return session
 
@@ -302,6 +328,9 @@ def run_agent(query: str, wardrobe: dict) -> dict:
 
         session["error"] = "FitFindr ran into an issue and couldn't complete your request. Please try again."
 
+    except BadRequestError as e:
+        print(f"[FitFindr] Malformed tool call retries exhausted: {e}")
+        session["error"] = "FitFindr ran into an issue and couldn't complete your request. Please try again."
     except Exception as e:
         print(f"[FitFindr] Unexpected error: {e}")
         session["error"] = "FitFindr ran into an unexpected error. Please try again."

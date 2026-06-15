@@ -16,7 +16,7 @@ import os
 import re
 
 from dotenv import load_dotenv
-from groq import Groq
+from groq import BadRequestError, Groq
 
 from config import GROQ_MODEL
 from utils.data_loader import load_listings
@@ -26,6 +26,9 @@ load_dotenv()
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 
+MAX_FAILED_RETRIES = 2
+
+
 def _get_groq_client():
     """Initialize and return a Groq client using GROQ_API_KEY from .env."""
     api_key = os.environ.get("GROQ_API_KEY")
@@ -34,6 +37,29 @@ def _get_groq_client():
             "GROQ_API_KEY not set. Add it to a .env file in the project root."
         )
     return Groq(api_key=api_key)
+
+
+def _chat(messages: list, **kwargs):
+    """Call Groq with automatic retry on malformed tool call generation.
+
+    Raises BadRequestError when retries are exhausted — caller is responsible
+    for setting session["error"].
+    """
+    client = _get_groq_client()
+    for attempt in range(MAX_FAILED_RETRIES):
+        try:
+            return client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                **kwargs,
+            )
+        except BadRequestError as e:
+            if e.body.get("error", {}).get("code") == "tool_use_failed":
+                print(f"[FitFindr] Malformed tool call (retry {attempt + 1}/{MAX_FAILED_RETRIES})")
+                if attempt + 1 >= MAX_FAILED_RETRIES:
+                    raise
+                continue
+            raise
 
 
 # ── Prompt constants ─────────────────────────────────────────────────────────
@@ -155,8 +181,6 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
     if not new_item:
         raise ValueError("suggest_outfit called with empty new_item")
 
-    client = _get_groq_client()
-
     item_text = (
         f"New thrift item: {new_item['title']}\n"
         f"- Category: {new_item['category']}\n"
@@ -181,13 +205,10 @@ def suggest_outfit(new_item: dict, wardrobe: dict) -> str:
         )
         user_message = f"{item_text}\nUser's wardrobe:\n{wardrobe_lines}"
 
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-    )
+    response = _chat([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message},
+    ])
 
     return response.choices[0].message.content
 
@@ -224,8 +245,6 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
     if not outfit or not outfit.strip():
         return "Something went wrong generating your fit card. Please try your search again."
 
-    client = _get_groq_client()
-
     item_details = (
         f"Item: {new_item['title']}\n"
         f"Price: ${new_item['price']:.2f}\n"
@@ -234,13 +253,9 @@ def create_fit_card(outfit: str, new_item: dict) -> str:
 
     user_message = f"{item_details}\nOutfit suggestion:\n{outfit}"
 
-    response = client.chat.completions.create(
-        model=GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": CREATE_FIT_CARD_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=1.0,
-    )
+    response = _chat([
+        {"role": "system", "content": CREATE_FIT_CARD_PROMPT},
+        {"role": "user", "content": user_message},
+    ], temperature=1.0)
 
     return response.choices[0].message.content
