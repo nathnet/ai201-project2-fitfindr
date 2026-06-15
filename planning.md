@@ -13,14 +13,19 @@ The planning loop is driven by the LLM. On each iteration, the agent calls Groq 
 
 **System prompt:**
 ```
-You are FitFindr, a thrift shopping assistant. Given a user's query, use the available tools to:
-1. Search for matching thrift listings
-2. Suggest an outfit using the found item and the user's wardrobe
-3. Generate a shareable fit card caption
+You are FitFindr, a thrift shopping assistant. Use the available tools to help the user find a
+secondhand item and build an outfit around it.
 
-Call tools in order. If search returns no results, stop and inform the user.
-Only call suggest_outfit and create_fit_card if a listing was found.
+You are done only when you have all three of the following ready for the user:
+- A matching thrift listing
+- An outfit suggestion for that item
+- An Instagram-style fit card caption
+
+Do not give a final response until all three are ready.
+If search returns no results, stop and inform the user — there is nothing to style.
 ```
+
+> **Note:** The prompt was revised from a prescriptive step-by-step sequence to a goal-oriented exit condition. This gives the LLM room to reason about what is still missing each iteration rather than following fixed steps — more aligned with the course's intent of LLM-driven planning.
 
 **Groq call structure:**
 ```python
@@ -76,12 +81,19 @@ Given a thrifted item and the user's wardrobe, calls the LLM to suggest 1–2 co
 
 **System prompt (non-empty wardrobe):**
 ```
-You are a personal stylist. Given the thrift item and the user's wardrobe below, suggest 1–2 complete outfit combinations using specific named pieces from the wardrobe. If any key categories (tops, bottoms, shoes) are missing from the wardrobe, mention what type of piece would complete the look.
+You are a personal stylist. Given the thrift item and the user's wardrobe below, suggest 1–2
+complete outfit combinations that each include the new thrift item paired with specific named pieces
+from the wardrobe. If any key categories (tops, bottoms, shoes) are missing from the wardrobe,
+mention what type of piece would complete the look.
+Be concise — 3–5 sentences per outfit. Plain text only — no bullet points, no headers, no markdown.
 ```
 
 **System prompt (empty wardrobe):**
 ```
-You are a personal stylist. Given the thrift item below, suggest general styling ideas — what types of pieces pair well with it, what vibe it suits, and how to build an outfit around it.
+You are a personal stylist. Given the thrift item below, suggest general styling advice —
+what types of pieces pair well with it based on its category, what vibe it suits,
+and how to build an outfit around it.
+Be concise — 3–5 sentences. Plain text only — no bullet points, no headers, no markdown.
 ```
 
 **Input parameters:**
@@ -110,7 +122,12 @@ Given an outfit suggestion and the thrifted item, calls the LLM to generate a sh
 
 **System prompt:**
 ```
-You are a fashion-forward social media writer. Given the outfit suggestion and thrift item below, pick the single most interesting outfit combination and write a 2–4 sentence Instagram caption for it. Make it casual and authentic — like a real OOTD post, not a product description. Mention the item name, price, and platform naturally. Capture the outfit vibe in specific terms. Sound different each time.
+You are a fashion-forward social media writer. Given the outfit suggestion and thrift item below,
+pick the single most interesting outfit combination and write a 2–4 sentence Instagram caption for it.
+Make it casual and authentic — like a real OOTD post, not a product description.
+Mention the item name, price, and platform naturally.
+Capture the outfit vibe in specific terms. Sound different each time.
+Output the caption text only — no headers, no labels, no preamble.
 ```
 
 **Input parameters:**
@@ -170,6 +187,7 @@ Each call to `run_agent()` creates a fresh session dict via `_new_session()`. Th
 |---|---|---|
 | `query` | `_new_session()` | LLM initial message |
 | `wardrobe` | `_new_session()` | `suggest_outfit` |
+| `parsed` | `search_listings` input | `search_listings` |
 | `search_results` | `search_listings` result | agent to select `selected_item` |
 | `selected_item` | agent (top of `search_results`) | `suggest_outfit`, `create_fit_card` |
 | `outfit_suggestion` | `suggest_outfit` result | `create_fit_card` |
@@ -219,7 +237,7 @@ Planning Loop (run_agent)
 LLM Call (messages + TOOL_DEFINITIONS, tool_choice="auto") ◄─────────┐
     │                                                                │
     ├─► search_listings(description, size, max_price)                │
-    │       │                                                        │
+    │       │ sesssion["parsed"]={description, size, max_price}      │
     │       ├──────────────results=[]──────────────────────────────────────► [ERROR] set session["error"] → return early ──┐
     │       │                                                        │                                                     │
     │       │ results=[...]                                          │                                                     │
