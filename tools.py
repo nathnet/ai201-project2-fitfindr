@@ -46,7 +46,7 @@ def _chat(messages: list, **kwargs):
     for setting session["error"].
     """
     client = _get_groq_client()
-    for attempt in range(MAX_FAILED_RETRIES):
+    for attempt in range(MAX_FAILED_RETRIES + 1):
         try:
             return client.chat.completions.create(
                 model=GROQ_MODEL,
@@ -55,9 +55,9 @@ def _chat(messages: list, **kwargs):
             )
         except BadRequestError as e:
             if e.body.get("error", {}).get("code") == "tool_use_failed":
-                print(f"[FitFindr] Malformed tool call (retry {attempt + 1}/{MAX_FAILED_RETRIES})")
-                if attempt + 1 >= MAX_FAILED_RETRIES:
+                if attempt >= MAX_FAILED_RETRIES:
                     raise
+                print(f"[FitFindr] Malformed tool call (retry {attempt + 1}/{MAX_FAILED_RETRIES})")
                 continue
             raise
 
@@ -83,7 +83,8 @@ COMPARE_PRICE_PROMPT = (
     "You are a thrift shopping expert. Given a listing and price data from comparable items "
     "in the same category, write a 2–3 sentence price assessment. State whether the price is "
     "a great deal, fair, or above average, and explain why using the comparable prices. "
-    "Be specific — reference the average price or price range. "
+    "Be specific — reference the average price, the price range, and the number of comparable items. "
+    "If there are very few comparables (1–2), acknowledge the limited sample. "
     "Plain text only — no bullet points, no headers, no markdown."
 )
 

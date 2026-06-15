@@ -100,7 +100,7 @@ Each dict contains:
 | `brand` | `str \| None` | Brand name, or `None` if unbranded |
 | `platform` | `str` | Resale platform (e.g. `"depop"`, `"poshmark"`) |
 
-**What happens if it returns nothing:** `dispatch_tool` sets `session["error"]` to `"No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords."` and the loop exits immediately — `suggest_outfit` and `create_fit_card` are never called.
+**What happens if it returns nothing:** `dispatch_tool` sets `session["error"]` to `"No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords."` and the loop exits immediately — `compare_price`, `suggest_outfit`, and `create_fit_card` are never called.
 
 ---
 
@@ -238,7 +238,7 @@ Each `run_agent()` call creates a fresh session dict via `_new_session()`. The s
 | `query` | `_new_session()` | Initial LLM message |
 | `wardrobe` | `_new_session()` | `suggest_outfit` via `dispatch_tool` |
 | `parsed` | `dispatch_tool` (search branch) | `search_listings` |
-| `search_results` | `dispatch_tool` (search branch) | Agent to select `selected_item` |
+| `search_results` | `dispatch_tool` (search branch) | `dispatch_tool` to select `selected_item` |
 | `selected_item` | `dispatch_tool` (search branch) | `suggest_outfit`, `create_fit_card` via `dispatch_tool` |
 | `outfit_suggestion` | `dispatch_tool` (suggest branch) | `create_fit_card` via `dispatch_tool` |
 | `price_assessment` | `dispatch_tool` (compare_price branch); defaults to `""` | `app.py` — rendered in panel 2 |
@@ -264,7 +264,7 @@ Tool results are also appended to `messages` each iteration so the LLM can read 
 | LLM — no tool calls | LLM exits loop before `fit_card` is set (gave up mid-pipeline) | `session["error"]` is set to `"FitFindr couldn't complete your request. Please try again."` Prevents `handle_query()` from rendering a partial session. |
 | Any tool / LLM call | Unhandled exception (e.g. API failure, I/O error) | The entire `run_agent()` body is wrapped in `try/except Exception` — any uncaught exception sets `session["error"]` to `"FitFindr ran into an unexpected error. Please try again."` rather than crashing the app. |
 
-**Concrete failure example tested:** Querying `"designer ballgown size XXS under $5"` against the 40-listing dataset returns zero results from `search_listings`. The agent sets `session["error"]` and returns immediately. The Gradio UI shows the error message in panel 1 with panels 2 and 3 empty, rather than proceeding to suggest an outfit for a nonexistent item.
+**Concrete failure example tested:** Querying `"designer ballgown size XXS under $5"` against the 40-listing dataset returns zero results from `search_listings`. The agent sets `session["error"]` and returns immediately. The Gradio UI shows the error message in panel 1 with panels 2, 3, and 4 empty, rather than proceeding to suggest an outfit for a nonexistent item.
 
 ---
 
@@ -326,8 +326,8 @@ LLM Call (messages + TOOL_DEFINITIONS, tool_choice="auto") ◄──────
     ▼                                                                                                                      │
 Return session ◄───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
     │
-    ├─ error set → Panel 1: error msg  | Panel 2: empty   | Panel 3: empty
-    └─ success  → Panel 1: listing     | Panel 2: outfit  | Panel 3: fit card
+    ├─ error set → Panel 1: error msg  | Panel 2: empty          | Panel 3: empty  | Panel 4: empty
+    └─ success  → Panel 1: listing     | Panel 2: price assess   | Panel 3: outfit | Panel 4: fit card
 ```
 
 ---

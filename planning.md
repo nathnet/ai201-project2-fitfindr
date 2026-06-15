@@ -32,7 +32,7 @@ available match — treat the returned listing as the working item.
 **Groq call structure:**
 ```python
 response = client.chat.completions.create(
-    model=LLM_MODEL,
+    model=GROQ_MODEL,
     messages=messages,
     tools=TOOL_DEFINITIONS,
     tool_choice="auto",
@@ -71,7 +71,7 @@ A ranked list of matching listing dicts sorted by keyword relevance score, each 
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if no listings match? -->
-If an empty list is returned, the LLM stops the planning loop, sets `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords.", and returns the session early without calling `suggest_outfit` or `create_fit_card`.
+If an empty list is returned, `dispatch_tool` sets `session["error"]` to "No listings found matching your description. Try broadening your search — remove the size or price filter, or use different keywords." and returns the session early without calling `suggest_outfit` or `create_fit_card`.
 
 ---
 
@@ -151,7 +151,7 @@ A 2–4 sentence string styled as a casual Instagram/TikTok caption. Mentions th
 
 **What happens if it fails or returns nothing:**
 <!-- What should the agent do if the outfit data is incomplete? -->
-If `outfit` is empty or whitespace, the tool returns a descriptive error string without calling the LLM. `run_agent()` routes the result by checking the `outfit` input: if empty or whitespace, the return value goes into `session["error"]`; otherwise into `session["fit_card"]`. The session is returned early with `fit_card` as None, and `app.py` surfaces the error in panel 1 with panels 2 and 3 left empty.
+If `outfit` is empty or whitespace, the tool returns a descriptive error string without calling the LLM. `run_agent()` routes the result by checking the `outfit` input: if empty or whitespace, the return value goes into `session["error"]`; otherwise into `session["fit_card"]`. The session is returned early with `fit_card` as None, and `app.py` surfaces the error in panel 1 with panels 2, 3, and 4 left empty.
 
 **Limitation:** the tool returns `str` in both success and failure paths — the assignment's required signature prevents returning `None` (the idiomatic Python failure signal). `run_agent()` must therefore check the input, not the output, to distinguish an error from a valid caption.
 
@@ -198,8 +198,7 @@ string noting that no same-category items with matching style tags exist — doe
    qualify its confidence — "based on 1 comparable" reads differently than "based on 12 comparables".
 
 **What happens if it fails or returns nothing:**
-If no comparables remain after filtering (score > 0), return a fixed string such as
-`"No comparable {category} listings found to assess this price."` without calling the LLM.
+If no comparables remain after filtering (score > 0), return `"No comparable {category} listings found to assess this price."` without calling the LLM.
 The planning loop continues — a missing price assessment does not stop the agent from
 proceeding to `suggest_outfit` and `create_fit_card`.
 
@@ -288,7 +287,7 @@ The LLM decides which tool to call next based on the message history:
 - `create_fit_card` receives an empty outfit string → set `session["error"]`, call no further tools, return session immediately
 
 **Loop termination:**
-The loop exits when the LLM returns a response with no `tool_calls`. If `fit_card` is still `None` at that point (the LLM gave up without completing all three steps), `session["error"]` is set to `"FitFindr couldn't complete your request. Please try again."` so the UI surfaces an error rather than rendering partial results. A max iteration guard of **5** is set (3 required tools + 2 buffer for search retries). If the guard is hit, `session["error"]` is set to `"FitFindr ran into an issue and couldn't complete your request. Please try again."` and the session is returned.
+The loop exits when the LLM returns a response with no `tool_calls`. If `fit_card` is still `None` at that point (the LLM gave up without completing all four steps), `session["error"]` is set to `"FitFindr couldn't complete your request. Please try again."` so the UI surfaces an error rather than rendering partial results. A max iteration guard of **5** is set (4 tools + 1 buffer for search retries). If the guard is hit, `session["error"]` is set to `"FitFindr ran into an issue and couldn't complete your request. Please try again."` and the session is returned.
 
 **Malformed tool call handling:**
 If Groq returns a `400 BadRequestError` with `code == "tool_use_failed"`, the LLM generated a malformed tool call. Retry logic is encapsulated in `_chat()` in `tools.py` — it retries the same call up to `MAX_FAILED_RETRIES = 2` times using a bounded `for` loop. Because the error fires before `messages.append(message)`, the message history is unchanged on each retry. If retries are exhausted, `_chat()` re-raises the `BadRequestError`. `run_agent` catches it at the outer level, logs the error, and sets `session["error"]` to `"FitFindr ran into an issue and couldn't complete your request. Please try again."`
@@ -305,13 +304,13 @@ Each call to `run_agent()` creates a fresh session dict via `_new_session()`. Th
 |---|---|---|
 | `query` | `_new_session()` | LLM initial message |
 | `wardrobe` | `_new_session()` | `suggest_outfit` |
-| `parsed` | `search_listings` input | `search_listings` |
-| `search_results` | `search_listings` result | agent to select `selected_item` |
-| `selected_item` | agent (top of `search_results`) | `suggest_outfit`, `create_fit_card` |
-| `outfit_suggestion` | `suggest_outfit` result | `create_fit_card` |
-| `price_assessment` | `compare_price` result; defaults to `""` if tool is not called | `app.py` (panel 2) |
-| `fit_card` | `create_fit_card` result | `app.py` (panel 4) |
-| `error` | early exit or exception handler | `app.py` (panel 1) |
+| `parsed` | `dispatch_tool` (search branch) | `search_listings` |
+| `search_results` | `dispatch_tool` (search branch) | `dispatch_tool` to select `selected_item` |
+| `selected_item` | `dispatch_tool` (search branch, top of results) | `suggest_outfit`, `create_fit_card` |
+| `outfit_suggestion` | `dispatch_tool` (suggest branch) | `create_fit_card` |
+| `price_assessment` | `dispatch_tool` (compare_price branch); defaults to `""` | `app.py` (panel 2) |
+| `fit_card` | `dispatch_tool` (fit card branch) | `app.py` (panel 4) |
+| `error` | `dispatch_tool` or exception handler | `app.py` — rendered in panel 1, panels 2, 3, and 4 left empty |
 | `retry_note` | `dispatch_tool` (search branch) | `app.py` (prepended to panel 1 when filters were relaxed) |
 
 Tool results are also appended to the `messages` list each iteration so the LLM can read them in the next loop. The session dict is the Python-side record used to populate the Gradio UI on return; the message history is the LLM-side record used to drive tool selection.
@@ -381,7 +380,8 @@ LLM Call (messages + TOOL_DEFINITIONS, tool_choice="auto") ◄──────
     │       ▼                                                        │                                                     │
     │   session["price_assessment"]="..."                            │                                                     │
     │       │ tool result appended to messages                       │                                                     │
-    │       └───────────────────────────────────────────────────────►┤                                                     │    │                                                                │                                                     │
+    │       └───────────────────────────────────────────────────────►┤                                                     │
+    │                                                                │                                                     │
     ├─► suggest_outfit(selected_item, wardrobe)                      │                                                     │
     │       │ wardrobe["items"]=[] → LLM: general styling advice     │                                                     │
     │       │ wardrobe["items"]!=[] → LLM: wardrobe-based suggestion │                                                     │
@@ -404,8 +404,8 @@ LLM Call (messages + TOOL_DEFINITIONS, tool_choice="auto") ◄──────
     ▼                                                                                                                      │
 Return session ◄───────────────────────────────────────────────────────────────────────────────────────────────────────────┘
     │
-    ├─ error set → Panel 1: error msg  | Panel 2: empty   | Panel 3: empty
-    └─ success  → Panel 1: listing     | Panel 2: outfit  | Panel 3: fit card
+    ├─ error set → Panel 1: error msg  | Panel 2: empty          | Panel 3: empty  | Panel 4: empty
+    └─ success  → Panel 1: listing     | Panel 2: price assess   | Panel 3: outfit | Panel 4: fit card
 ```
 
 ---
@@ -431,9 +431,9 @@ Return session ◄────────────────────�
 
 **Milestone 4 — Planning loop and state management:**
 
-- **TOOL_DEFINITIONS:** Give Claude Code the input parameter tables for all three tools from the Tools section. Ask it to produce the Groq-compatible JSON schema definitions for each tool. Verify each definition matches the parameter names, types, and required fields in the spec.
+- **TOOL_DEFINITIONS:** Give Claude Code the input parameter tables for all four tools from the Tools section. Ask it to produce the Groq-compatible JSON schema definitions for each tool. Verify each definition matches the parameter names, types, and required fields in the spec.
 - **run_agent() loop:** Give Claude Code the Initial LLM Call section, Planning Loop section, State Management section, and the Architecture diagram. Ask it to implement the LLM-driven loop with Groq tool calling. Verify: message history is appended correctly each iteration, early exit on empty search results sets `session["error"]` and returns without calling remaining tools, and the max iteration guard is present. Test using the two CLI cases already in `agent.py` — happy path and no-results path.
-- **handle_query():** Give Claude Code the `app.py` TODO comments and the State Management section. Ask it to implement `handle_query()`. Verify: empty query is caught early, wardrobe is selected correctly based on `wardrobe_choice`, `session["error"]` routes to panel 1 with panels 2 and 3 empty, and success routes all three fields to the correct panels. Test by running `app.py` and submitting both a valid query and the deliberate no-results example query.
+- **handle_query():** Give Claude Code the `app.py` TODO comments and the State Management section. Ask it to implement `handle_query()`. Verify: empty query is caught early, wardrobe is selected correctly based on `wardrobe_choice`, `session["error"]` routes to panel 1 with panels 2, 3, and 4 empty, and success routes all four fields to the correct panels. Test by running `app.py` and submitting both a valid query and the deliberate no-results example query.
 
 ---
 
@@ -484,5 +484,5 @@ The caption is stored in session["fit_card"].
 
 **Final output to user:**
 <!-- What does the user actually see at the end? -->
-3 things: 1. top listing match, 2. outfit idea, and 3. a nice caption 
-for their instagram post (fit card)
+4 things: 1. top listing match, 2. price assessment, 3. outfit idea, and 4. a fit card caption
+for their instagram post

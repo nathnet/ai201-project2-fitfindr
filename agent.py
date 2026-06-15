@@ -345,7 +345,7 @@ def run_agent(query: str, wardrobe: dict) -> dict:
             for tool_call in message.tool_calls:
                 print(f"[FitFindr] Calling tool: {tool_call.function.name}")
                 result = dispatch_tool(tool_call, session)
-                print(f"[FitFindr] Tool result: {result}")
+                print(f"[FitFindr] Tool result: {result[:120]}{'...' if len(result) > 120 else ''}")
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call.id,
