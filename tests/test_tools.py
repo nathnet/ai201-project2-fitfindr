@@ -101,7 +101,7 @@ def test_search_all_filters():
 
 def test_suggest_outfit_non_empty_wardrobe_uses_wardrobe_prompt():
     mock = _mock_client("Pair with your baggy jeans and chunky sneakers.")
-    with patch("tools._get_groq_client", return_value=mock):
+    with patch("tools.GROQ_CLIENT", mock):
         result = suggest_outfit(SAMPLE_ITEM, SAMPLE_WARDROBE)
     system_prompt = mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
     assert system_prompt == SUGGEST_OUTFIT_PROMPT_WARDROBE
@@ -110,7 +110,7 @@ def test_suggest_outfit_non_empty_wardrobe_uses_wardrobe_prompt():
 
 def test_suggest_outfit_empty_wardrobe_uses_general_prompt():
     mock = _mock_client("This piece pairs well with wide-leg trousers.")
-    with patch("tools._get_groq_client", return_value=mock):
+    with patch("tools.GROQ_CLIENT", mock):
         result = suggest_outfit(SAMPLE_ITEM, EMPTY_WARDROBE)
     system_prompt = mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
     assert system_prompt == SUGGEST_OUTFIT_PROMPT_GENERAL
@@ -126,7 +126,7 @@ def test_suggest_outfit_empty_item_raises():
 
 def test_create_fit_card_valid_outfit_calls_llm():
     mock = _mock_client("Thrifted this butterfly tee on depop for $18 and I'm obsessed.")
-    with patch("tools._get_groq_client", return_value=mock):
+    with patch("tools.GROQ_CLIENT", mock):
         result = create_fit_card("Pair with baggy jeans and chunky sneakers.", SAMPLE_ITEM)
     system_prompt = mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
     assert system_prompt == CREATE_FIT_CARD_PROMPT
@@ -137,7 +137,7 @@ def test_create_fit_card_valid_outfit_calls_llm():
 @pytest.mark.parametrize("bad_outfit_input", ["", "   ", "\t", "\n"])
 def test_create_fit_card_bad_outfit_input(bad_outfit_input):
     mock = _mock_client("should not be reached")
-    with patch("tools._get_groq_client", return_value=mock):
+    with patch("tools.GROQ_CLIENT", mock):
         result = create_fit_card(bad_outfit_input, SAMPLE_ITEM)
     assert result == "Something went wrong generating your fit card. Please try your search again."
     mock.chat.completions.create.assert_not_called()
@@ -147,7 +147,7 @@ def test_create_fit_card_bad_outfit_input(bad_outfit_input):
 
 def test_compare_price_calls_llm_with_comparables():
     mock = _mock_client("At $18.00, this top is priced below the $22.00 average for similar tops.")
-    with patch("tools._get_groq_client", return_value=mock):
+    with patch("tools.GROQ_CLIENT", mock):
         result = compare_price(SAMPLE_ITEM)
     system_prompt = mock.chat.completions.create.call_args.kwargs["messages"][0]["content"]
     assert system_prompt == COMPARE_PRICE_PROMPT
@@ -158,7 +158,7 @@ def test_compare_price_calls_llm_with_comparables():
 def test_compare_price_no_comparables_skips_llm():
     isolated_item = {**SAMPLE_ITEM, "style_tags": ["zzz-nonexistent-tag"]}
     mock = _mock_client("should not be reached")
-    with patch("tools._get_groq_client", return_value=mock):
+    with patch("tools.GROQ_CLIENT", mock):
         result = compare_price(isolated_item)
     assert result == f"No comparable {isolated_item['category']} listings found to assess this price."
     mock.chat.completions.create.assert_not_called()

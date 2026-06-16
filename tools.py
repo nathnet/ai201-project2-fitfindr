@@ -26,8 +26,6 @@ load_dotenv()
 
 # ── Groq client ───────────────────────────────────────────────────────────────
 
-MAX_FAILED_RETRIES = 2
-
 
 def _get_groq_client():
     """Initialize and return a Groq client using GROQ_API_KEY from .env."""
@@ -39,16 +37,19 @@ def _get_groq_client():
     return Groq(api_key=api_key)
 
 
+MAX_FAILED_RETRIES = 2
+GROQ_CLIENT = _get_groq_client()
+
+
 def _chat(messages: list, **kwargs):
     """Call Groq with automatic retry on malformed tool call generation.
 
     Raises BadRequestError when retries are exhausted — caller is responsible
     for setting session["error"].
     """
-    client = _get_groq_client()
     for attempt in range(MAX_FAILED_RETRIES + 1):
         try:
-            return client.chat.completions.create(
+            return GROQ_CLIENT.chat.completions.create(
                 model=GROQ_MODEL,
                 messages=messages,
                 **kwargs,
